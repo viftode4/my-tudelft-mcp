@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.local/
+.env
+.env.*
+!.env.example
+*.vault
+*.vault.*.tmp
+*.sqlite
+*.sqlite-*
+*.har
+playwright/.auth/
+*.log
+output/
+coverage/

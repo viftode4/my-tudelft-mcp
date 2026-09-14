@@ -1,0 +1,42 @@
+{
+  "name": "tudelft-brightspace-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A local Brightspace MCP for everyday TU Delft course work.",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "login": "tsx src/cli.ts login",
+    "doctor": "tsx src/cli.ts doctor",
+    "start": "node dist/cli.js serve",
+    "dev": "tsx src/cli.ts serve"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "cheerio": "1.2.0",
+    "fflate": "0.8.3",
+    "mammoth": "1.12.3",
+    "pdfjs-dist": "6.3.289",
+    "playwright": "1.63.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "26.5.1",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/viftode4/tudelft-brightspace-mcp.git"
+  },
+  "homepage": "https://github.com/viftode4/tudelft-brightspace-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/viftode4/tudelft-brightspace-mcp/issues"
+  }
+}

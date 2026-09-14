@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "tudelft-brightspace": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/tudelft-brightspace-mcp/dist/cli.js",
+        "serve"
+      ]
+    }
+  }
+}
