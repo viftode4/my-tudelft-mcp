@@ -23,6 +23,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
+      - name: Install optional mail SDK for offline compatibility checks
+        if: runner.os == 'Windows'
+        run: pwsh -NoProfile -File scripts/install-mail.ps1
       - run: npm run check
       - run: npm test
       - run: npm run build

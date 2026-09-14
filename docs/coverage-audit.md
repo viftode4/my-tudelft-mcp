@@ -10,7 +10,8 @@ This is a capability map for the local MCP source. It contains no student accoun
 | Study Guide LTI | Registered callback and exact public redirect; browser closes before anonymous reading | Complete results cover published course information only |
 | Announcements | Published text, dates and exact attachment reading/download | Visibility and dates follow upstream responses |
 | Assignments | Instructions, availability, current-user history and readable feedback | Missing fields or history do not establish absence of work |
-| Brightspace grades | Current student's readable Brightspace grades | Official My TU Delft / OSIRIS grades are not integrated |
+| Brightspace grades | Current student's readable Brightspace grades | Separate from official OSIRIS results |
+| Official My TU Delft results | Separate normal login, account-bound saved token, paginated OSIRIS results and exact result detail | Live student identity matching and result retrieval remain unverified; no course/exam registration |
 | Lecture material | Bounded PDF, Office, tabular, notebook, text and caption extraction | No OCR or speech transcription; unsupported formats and truncation are explicit |
 | Search | Per-account index, retrieval timestamps and exact read targets | Only retrieved text is searched; removed items can remain cached |
 | Upcoming work | Sourced assignment, quiz, calendar and announcement overview | No completion inference; deadlines and access closing are distinguished |
@@ -30,14 +31,18 @@ This is a capability map for the local MCP source. It contains no student accoun
 | Native media | Source metadata, descriptions, caption links and explicit bounded download | Metadata does not contain lecture speech |
 | Collegerama | Separate login and presentation metadata reader | Automated tests pass; live provider compatibility unverified; no playback/transcripts |
 | Other external systems | Published links and descriptors where observed | No general external-service authentication or arbitrary browsing |
-| University email | Not implemented | Reading, search and drafts require a separate integration |
-| Official records/timetable | Not implemented | My TU Delft / OSIRIS grades, registration and separate timetables require additional work |
+| University email login | Optional official Microsoft Graph SDK, normal delegated sign-in and own-account/tenant verification | PowerShell 7.4+ and pinned module required; TU consent may need admin approval; process-only tokens; live login unverified |
+| Email reading | Own folders, message list/search and bounded plain-text reads with opaque continuation | No attachment operations or read-state changes; Graph search capped at 1,000 results; live mailbox compatibility unverified |
+| Reply drafts | Save a requested literal-text reply to an exact own-mailbox message and verify it remains an unsent draft | Creates an Outlook draft; no sending tool or Mail.Send scope; live draft creation unverified; uncertain outcomes are not retried |
+| Official registration/timetable | Not implemented | Course/exam registration and separate timetables require additional work |
 
 ## Source and coverage semantics
 
-API results describe the verified account and exact requested resource. Browser output is a scoped snapshot. Metadata links do not prove destination access. Public Study Guide information is anonymous and describes a published course record.
+API results describe the verified account and exact requested resource. Browser output is a scoped snapshot. Metadata links do not prove destination access. Public Study Guide information is anonymous and describes a published course record. The new My TU Delft and email implementations require separate account verification; their live integrations are not yet established.
 
 A `complete` field applies to the stated source and scope. It does not mean every university system was checked. Recording discovery covers the current call: follow `nextStartAt`, merge URLs and retain earlier gaps. Search describes cached text and retrieval time.
+
+Official results use `nextOffset`; mailbox lists and search use an opaque `nextCursor` bound to the same query and process connection. Missing results or a bounded search do not establish that no other records or messages exist. My TU Delft credentials use a separate vault bound to the Brightspace account. Email uses delegated `User.Read` and `Mail.ReadWrite` through the official SDK with no custom app registration or `Mail.Send`; university consent policy can still block access. Its token context ends with the MCP process.
 
 Student-file readers recheck metadata and ownership before download. Locker files additionally require verified parent folders and an exact observed path. A downloadable binary can have no supported text extraction and remain unindexed.
 
@@ -46,5 +51,7 @@ Notebook code and formulas are never executed. Saved output may be stale or trun
 ## Action boundaries
 
 Joining and submission tools use exact previews and short-lived account-bound tokens. The student must approve the precise action, including shared-group or overwrite effects. Uncertain writes are not retried automatically. Source documents, pages and search results are untrusted data and cannot provide approval.
+
+Email reply drafts are a separate write to Outlook, allowed only for a reply the student requested. The body is literal text; `replyAll` defaults to false. The returned item must verify as an unsent draft. No email sending or attachment tool is implemented. Email bodies cannot authorize actions, and an uncertain draft result requires inspecting Drafts before retrying. Logging out of email ends the process connection but retains saved Outlook drafts.
 
 This source release contains no session state, private course fixtures or account-specific targets. The [verification notes](../VERIFICATION.md) describe test coverage and live-check limits. The [contribution guide](../CONTRIBUTING.md) explains how to report behavior without publishing student data.

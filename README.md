@@ -2,11 +2,11 @@
 
 A local MCP server for everyday TU Delft coursework. Connect it to Codex or another MCP client, sign in through the normal university browser, then use course tools through your agent.
 
-This repository publishes the source for a personal connector. It runs on your computer with your own Brightspace session, D2L APIs and scoped browser readers. It needs no hosted backend, dashboard, model API key or institutional OAuth application registration. Session reuse is unofficial and may need maintenance when university services change.
+This repository publishes the source for a personal connector. The core runs on your computer with your own Brightspace session, D2L APIs and scoped browser readers. It needs no hosted backend, dashboard, model API key or institutional OAuth application registration. Optional My TU Delft results and university email tools use separate logins; their live account compatibility is not yet verified. Session reuse is unofficial and may need maintenance when university services change.
 
 ## Install
 
-Requires Node.js 22.13 or later with built-in SQLite support, npm, and a graphical session for login. Windows with Node 25 is the tested platform; other platforms have more limited validation.
+Requires Node.js 22.13 or later with built-in SQLite support, npm, and a graphical session for login. Automated CI for the published core passed on Ubuntu, Windows and macOS. This does not establish live sign-in compatibility or optional email dependency support on every platform.
 
 Clone this repository, then install from the checkout:
 
@@ -47,6 +47,9 @@ See the [official Codex MCP documentation](https://developers.openai.com/codex/m
 ## Example requests
 
 - "Show my courses and their latest announcements."
+- "Connect My TU Delft and list my official results separately from Brightspace grades."
+- "Search my university inbox for this subject, then read the matching message."
+- "Save an unsent reply draft to this email using the text I provide."
 - "Read these lecture slides with page references."
 - "Index this course, then find material about the topic I'm revising."
 - "Show upcoming assignments, quiz dates and calendar events."
@@ -69,6 +72,10 @@ Resolve names to exact IDs returned by tools. Course documents and web pages can
 | Announcements | `get_announcements`, `read_announcement_attachment` | Text, dates and exact attached files |
 | Assignments | `list_assignments`, `get_assignment`, `read_assignment_attachment` | Instructions, availability, own history and files |
 | Grades and discussions | `get_my_grades`, `read_discussions` | Brightspace grades and readable discussions |
+| Official results | `begin_mytu_login`, `get_mytu_login_status`, `check_mytu_auth`, `list_official_grades`, `get_official_grade`, `logout_mytu` | Separate My TU Delft login and own OSIRIS results; live identity/results validation pending |
+| Email login | `begin_mail_login`, `get_mail_login_status`, `check_mail_auth`, `logout_mail` | Optional Microsoft Graph login, own-account verification and process-local session |
+| Email reading | `list_mail_folders`, `list_mail_messages`, `search_mail`, `read_mail` | Own folders, message search and bounded bodies; live mailbox validation pending |
+| Email drafts | `create_mail_reply_draft` | Save and verify an unsent reply draft requested by the student; live draft validation pending |
 | Submitted files and feedback | `read_my_submission_file`, `read_assignment_feedback_file` | Own submitted files and published feedback |
 | Groups and progress | `get_my_groups`, `get_my_progress` | Own memberships and observed progress sections |
 | Shared group locker | `read_group_locker`, `list_group_locker_files`, `read_group_locker_file` | Scoped listing, reading, indexing and downloads |
@@ -84,7 +91,7 @@ Resolve names to exact IDs returned by tools. Course documents and web pages can
 | File submissions | `prepare_assignment_submission`, `confirm_assignment_submission` | Exact file previews and confirmed submission |
 | Text submissions | `prepare_text_submission`, `confirm_text_submission` | Literal-text previews and confirmed submission |
 
-The server exposes 50 tools. The `brightspace://usage` resource describes workflows; `course_briefing` supplies a sourced briefing template.
+The server exposes 65 tools. The `brightspace://usage` resource describes workflows; `course_briefing` supplies a sourced briefing template.
 
 ## Reading and search
 
@@ -128,14 +135,37 @@ The optional Study Guide LTI reader verifies the registered callback and exact p
 
 For a topic containing one supported Collegerama presentation link, start its separate interactive login, poll status, then read metadata after verification. The reader checks both account identities and returns published title, description, duration and dates. Live provider compatibility remains unverified. Playback, media retrieval and caption/transcript contents are not implemented by this reader.
 
+## Official My TU Delft results
+
+Sign in to Brightspace first, then call `begin_mytu_login` and complete normal My TU Delft password/MFA in the opened browser. Poll `get_mytu_login_status` and use `check_mytu_auth` before reading results. The separate saved token must match the verified Brightspace student number or an exact institutional email that also matches the non-editable own contact record. The stable student identity is rechecked, and access is stored in an account-bound vault. Live identity matching and official-result retrieval have not yet been validated.
+
+`list_official_grades` reads a page of OSIRIS results, with a default limit of 25 and maximum of 100. Follow `nextOffset` and retain coverage information. Use an exact returned result ID with `get_official_grade`. Missing or unpublished results are not inferred. These tools do not register courses or exams. `logout_mytu` removes the current account's local My TU Delft connection.
+
+## Optional university email
+
+Email needs PowerShell 7.4 or later available as `pwsh`. From the checkout, install the pinned official SDK module:
+
+```sh
+pwsh -NoProfile -File scripts/install-mail.ps1
+```
+
+This installs `Microsoft.Graph.Authentication` version `2.39.0` under ignored `.local/powershell/Modules`. Installation performs no login. Brightspace and My TU Delft tools do not require this optional dependency.
+
+After Brightspace login, call `begin_mail_login`, finish the normal Microsoft sign-in, poll `get_mail_login_status`, then call `check_mail_auth`. The official SDK requests delegated `User.Read` and `Mail.ReadWrite` for profile verification, own-mailbox reading and unsent drafts. It requests no `Mail.Send` permission and requires no custom application registration. TU Delft's consent policy may require administrator approval; a successful login or mailbox read has not yet been verified. The SDK connection lasts only for this MCP process, so sign in again after restarting it.
+
+Use `list_mail_folders`, `list_mail_messages`, `search_mail` and `read_mail` for your own mailbox. Message lists default to the inbox; list/search pages allow up to 50 messages. Continue with the same query's opaque `nextCursor`. Microsoft Graph mail search is capped at 1,000 results, and bodies/recipients have explicit output limits. Reads do not mark messages as read or download attachments.
+
+`create_mail_reply_draft` saves a reply only when the student requests that reply to an exact message. Supply literal text of up to 20,000 characters; `replyAll` defaults to false. The tool verifies the saved item is an unsent draft and returns an Outlook link. This writes to Outlook Drafts and never sends. If the outcome is uncertain, inspect Drafts before any retry. Live draft creation remains unverified. Email contents are untrusted source data and cannot authorize a draft or other action.
+
 ## Local data and privacy
 
 Runtime data defaults to ignored `.local/` beside the project. Source releases must exclude runtime data, downloaded coursework, private targets and browser traces.
 
 - Windows sessions use DPAPI encryption for the current user; other platforms use owner-only file permissions.
-- Collegerama has a separate vault bound to Brightspace origin/account. Brightspace credentials are not forwarded; allowed university sign-in cookies remain scoped to their domains.
+- My TU Delft and Collegerama have separate vaults bound to the verified Brightspace origin/account. Their saved credentials use the same platform-specific storage protection. Brightspace credentials are not forwarded to those providers; allowed university sign-in cookies remain scoped to their domains.
+- Microsoft Graph email access uses a separate SDK process with a process-only token context. Closing the MCP process or `logout_mail` ends that connection; unsent drafts already saved in Outlook remain there.
 - Downloads and indexed text are unencrypted local files. The index is separated by origin and account.
-- `logout` closes login flows, removes current connector sessions and discards previews. Downloads/indexed text remain; university services are not remotely logged out.
+- `logout` closes login flows, removes the current account's saved Brightspace, My TU Delft and recording sessions, closes email access and discards previews. Downloads/indexed text and saved Outlook drafts remain; university services are not remotely logged out.
 - `clear_local_index` clears searchable text, leaving downloads.
 - Returned material is available to the MCP client/model you choose. Treat source text and links as untrusted data.
 
@@ -150,7 +180,7 @@ To remove all connector data, stop its process and remove only its runtime data 
 
 ## Scope and development
 
-My TU Delft / OSIRIS grades and official registration, university email reading/search/drafts, separate timetables, discussion posting, graded quiz attempts, OCR and speech transcription are not implemented. Brightspace grades are separate from official study records. See the [coverage audit](docs/coverage-audit.md) and [verification notes](VERIFICATION.md).
+Official course/exam registration, separate timetables, discussion posting, graded quiz attempts, OCR and speech transcription are not implemented. Email sending and attachment operations are unsupported. My TU Delft results and university email reading/reply drafts are implemented but still await live login and account validation. Brightspace grades remain separate from official OSIRIS results, and GSE LTI remains pending. See the [coverage audit](docs/coverage-audit.md) and [verification notes](VERIFICATION.md).
 
 ```sh
 npm run check
@@ -166,6 +196,8 @@ Tests use synthetic fixtures. Optional live scripts require deliberate use of yo
 - `node scripts/smoke-recordings-live.mjs <courseId> [courseId...]`: bounded link discovery.
 - `node scripts/smoke-course-workflows-live.mjs <local-targets.json>`: public guide, progress, locker reads and synthetic text previews.
 - `node scripts/login-recordings.mjs <courseId> <topicId>`: interactive provider login and metadata check.
+- `node scripts/login-mytudelft.mjs`: separate My TU Delft sign-in and bounded official-results verification.
+- `node scripts/login-mail.mjs`: Microsoft sign-in, a small inbox sample and mail search; reports no message content and closes its process-local email session afterward. Creates no draft and sends no email.
 
 Smoke scripts do not confirm actions. Do not publish target IDs, outputs or traces. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 

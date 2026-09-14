@@ -1,0 +1,394 @@
+import { createHash } from 'node:crypto';
+import { chromium, type APIResponse, type Browser, type BrowserContext, type Route } from 'playwright';
+import type { Auth } from './auth.js';
+import type { BrightspaceClient } from './client.js';
+import { BrightspaceError, safeError } from './errors.js';
+import { Vault } from './vault.js';
+import { record, str, type Row } from './util.js';
+
+const ORIGIN = 'https://my.tudelft.nl';
+const API = '/student/osiris';
+const OAUTH = 'https://osi-auth-server-prd.osiris-link.nl';
+const SAML = 'https://osiris-saml.tudelft.nl';
+const ENGINE = 'https://engine.surfconext.nl';
+const IDP = 'https://login.tudelft.nl';
+const ACS = '/osirissaml/saml2/acs/osiris-student';
+const MAX_BYTES = 2 * 1024 * 1024;
+const LOGIN_MS = 10 * 60_000;
+const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
+type Client = Pick<BrightspaceClient, 'config' | 'json' | 'sessionIdentity'>;
+export interface MyTuIdentity { accountId: string; studentNumbers: string[]; institutionalEmail?: string }
+type IdentityMethod = 'institutional_student_number' | 'institutional_email';
+interface VerifiedIdentity { studentHash: string; method: IdentityMethod }
+interface Session {
+  version: 1; brightspaceOrigin: string; accountId: string; providerOrigin: string;
+  accessToken: string; expiresAt: number; studentHash: string; identityMethod: string; savedAt: string;
+}
+interface Token { accessToken: string; expiresAt: number }
+export interface MyTuLoginStatus {
+  state: 'idle' | 'waiting' | 'connected' | 'failed'; message: string; identityMethod?: IdentityMethod; error?: ReturnType<typeof safeError>;
+}
+function fieldNames(value: Row): string[] { return Object.keys(value).filter(key => /^[a-zA-Z_][a-zA-Z0-9_.-]{0,70}$/.test(key)).slice(0, 40); }
+function number(value: unknown): string | undefined {
+  const candidate = typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : typeof value === 'string' ? value.trim() : '';
+  return /^[0-9]{1,18}$/.test(candidate) ? candidate : undefined;
+}
+function institutionalEmail(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 254) return undefined;
+  const email = value.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9._+-]{0,99}@(student\.)?tudelft\.nl$/.test(email) ? email : undefined;
+}
+/**
+ * /gebruiker supplies studentnummer and the account-menu e_mailadres. The
+ * contact page separately gates its same main email with read/edit permissions.
+ * External and application addresses, display names, and domain/local-part guesses are excluded.
+ */
+export function matchMyTuIdentity(expected: MyTuIdentity, user: Row, contact?: Row): VerifiedIdentity {
+  const student = number(user.studentnummer);
+  const unverified = () => new BrightspaceError('MYTU_IDENTITY_UNVERIFIED',
+    'The My TU Delft account could not be matched to a verified institutional identifier. The login has not been saved.',
+    { availableIdentityFields: fieldNames(user), ...(contact ? { availableContactFields: fieldNames(contact) } : {}),
+      brightspaceStudentNumberAvailable: expected.studentNumbers.length > 0,
+      brightspaceInstitutionalEmailAvailable: Boolean(institutionalEmail(expected.institutionalEmail)) });
+  const mismatch = () => new BrightspaceError('MYTU_ACCOUNT_MISMATCH',
+    'The My TU Delft student account does not match the current Brightspace account. Sign in with the same TU Delft account.');
+  if (!student || expected.studentNumbers.length > 1) throw unverified();
+  if (user.toegang_applicatie !== undefined && user.toegang_applicatie !== 'J') throw new BrightspaceError('MYTU_PERMISSION_DENIED', 'This account does not have access to the student application.');
+  // A conflicting student number must never fall through to the weaker email check.
+  if (expected.studentNumbers.length) {
+    if (!expected.studentNumbers.includes(student)) throw mismatch();
+    return { studentHash: digest(student), method: 'institutional_student_number' };
+  }
+  const expectedEmail = institutionalEmail(expected.institutionalEmail), accountEmail = institutionalEmail(user.e_mailadres);
+  if (!expectedEmail || !accountEmail) throw unverified();
+  if (accountEmail !== expectedEmail) throw mismatch();
+  if (!contact || contact.mag_e_mailadres_lezen !== 'J' || contact.mag_e_mailadres_wijzigen !== 'N') throw unverified();
+  const mainEmail = institutionalEmail(contact.e_mailadres);
+  if (!mainEmail) throw unverified();
+  if (mainEmail !== accountEmail) throw mismatch();
+  return { studentHash: digest(student), method: 'institutional_email' };
+}
+function tokenFrom(value: unknown): Token {
+  const body = record(value), token = str(body.access_token), seconds = Number(body.expires_in);
+  if (!token || token.length > 32_000 || /[\r\n]/.test(token) || !Number.isFinite(seconds) || seconds <= 0 || seconds > 366 * 86400
+    || body.token_type !== undefined && str(body.token_type).toLowerCase() !== 'bearer') {
+    throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The student application returned an unfamiliar token response.', { availableFields: fieldNames(body) });
+  }
+  return { accessToken: token, expiresAt: Date.now() + seconds * 1000 };
+}
+function duplicates(params: URLSearchParams): boolean { return [...params.keys()].some(key => params.getAll(key).length !== 1); }
+function staticDiagnostic(url: URL): Row {
+  const origin = ['https:', 'http:'].includes(url.protocol) && url.origin.length <= 200 ? url.origin : '[unrecognized origin]';
+  const pathClass = url.origin === ORIGIN ? url.pathname === API + '/token' ? 'mytu_token' : url.pathname.startsWith(API + '/') ? 'mytu_api' : 'mytu_page_or_asset'
+    : url.origin === OAUTH ? 'osiris_authorization' : url.origin === SAML ? 'university_osiris_saml'
+    : url.origin === ENGINE ? 'surf_authentication' : url.origin === IDP ? 'university_login' : 'unclassified_path';
+  return { origin, pathClass };
+}
+
+/** Origins and protocol routes observed in the university's public OSIRIS login bootstrap. */
+export function myTuRequestAllowed(url: URL, method: string, resourceType: string, body?: string | null): boolean {
+  if (![ORIGIN, OAUTH, SAML, ENGINE, IDP].includes(url.origin) || url.username || url.password || url.hash
+    || resourceType === 'media' || /analytics|telemetry|tracking|logout|signout/i.test(url.pathname)) return false;
+  if (url.origin === ORIGIN && url.pathname === API + '/token' && method !== 'POST') return false;
+  if (['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    if (url.origin === OAUTH && url.pathname === '/oauth/authorize') {
+      const p = url.searchParams;
+      return !duplicates(p) && p.get('response_type') === 'code' && [ORIGIN, ORIGIN + '/'].includes(p.get('redirect_uri') ?? '')
+        && Boolean(p.get('client_id')) && (p.get('client_id') ?? '').length <= 200;
+    }
+    return true;
+  }
+  if (method !== 'POST') return false;
+  if (url.origin === IDP) return /^\/(?:sso|nidp)(?:\/|$)/i.test(url.pathname);
+  if (url.origin === ENGINE) return url.pathname.startsWith('/authentication/');
+  if (url.origin === SAML && url.pathname === ACS) {
+    const form = new URLSearchParams(body ?? '');
+    return !duplicates(form) && form.has('SAMLResponse') && [...form.keys()].every(key => ['SAMLResponse', 'RelayState'].includes(key));
+  }
+  if (url.origin !== ORIGIN || url.pathname !== API + '/token' || url.search) return false;
+  let json: Row; try { json = record(JSON.parse(body ?? '')); } catch { return false; }
+  // These two protocol fields have string values. Count their encoded keys before
+  // forwarding the original body so duplicate-key parser differences cannot alter the callback.
+  const encodedKeys = [...(body ?? '').matchAll(/"((?:[^"\\]|\\.)*)"\s*:/g)];
+  let keys: string[]; try { keys = encodedKeys.map(match => JSON.parse('"' + match[1] + '"') as string); } catch { return false; }
+  if (keys.length !== Object.keys(json).length || new Set(keys).size !== keys.length) return false;
+  // The web app exchanges its callback code at /token; native/pre-authentication/impersonation flows are excluded.
+  return Object.keys(json).length > 0 && Object.keys(json).every(key => ['code', 'redirect_uri'].includes(key))
+    && typeof json.code === 'string' && json.code.length > 0 && json.code.length <= 16_000
+    && (json.redirect_uri === '' || json.redirect_uri === '/');
+}
+
+export interface MyTuGuardState { blockedRequests: number; navigationCount: number; failure?: BrightspaceError }
+export async function guardMyTuLogin(context: BrowserContext, active: () => Promise<void>,
+  observe: (url: URL, response: APIResponse) => Promise<void> = async () => undefined,
+  fetchResponse: (route: Route) => Promise<APIResponse> = route => route.fetch({ maxRedirects: 0, maxRetries: 0, timeout: 25_000 })): Promise<MyTuGuardState> {
+  const state: MyTuGuardState = { blockedRequests: 0, navigationCount: 0 };
+  await context.route('**/*', async route => {
+    const req = route.request(), navigation = req.isNavigationRequest(), top = navigation && !req.frame().parentFrame();
+    const method = req.method(), knownMethod = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(method) ? method : 'OTHER';
+    let url: URL; try { url = new URL(req.url()); } catch { await route.abort('blockedbyclient'); return; }
+    const fail = (reason: string, target?: URL) => new BrightspaceError('MYTU_LOGIN_BLOCKED',
+      'The My TU Delft login requested an unsupported step. The blocked request was not sent.',
+      { reason, method: knownMethod, request: staticDiagnostic(url), ...(target ? { destination: staticDiagnostic(target) } : {}) });
+    try {
+      if (state.failure) throw state.failure;
+      if (!myTuRequestAllowed(url, method, req.resourceType(), [ORIGIN, SAML].includes(url.origin) ? req.postData() : undefined)) {
+        state.blockedRequests++;
+        if (top || method === 'POST' && url.origin !== ORIGIN) state.failure = fail('request_not_allowed');
+        await route.abort('blockedbyclient').catch(() => undefined); return;
+      }
+      if (navigation && ++state.navigationCount > 40) throw fail('navigation_limit');
+      await active();
+      const response = await fetchResponse(route);
+      try {
+        await active();
+        const status = response.status();
+        if ([301, 302, 303, 307, 308].includes(status)) {
+          const raw = response.headers().location;
+          if (!raw || raw.length > 32_000) throw fail('invalid_redirect');
+          let target: URL; try { target = new URL(raw, url); } catch { throw fail('invalid_redirect'); }
+          if (!myTuRequestAllowed(target, 'GET', req.resourceType())) throw fail('redirect_not_allowed', target);
+          if (!navigation) throw fail('redirect_not_navigation', target);
+          if ([307, 308].includes(status) && method !== 'GET' && method !== 'HEAD') throw fail('redirect_would_preserve_post', target);
+          await route.fulfill({ status: 200, contentType: 'text/html', headers: { 'referrer-policy': 'no-referrer' },
+            body: '<!doctype html><script>location.replace(' + JSON.stringify(target.href).replaceAll('<', '\\u003c') + ')</script>' });
+        } else {
+          if (top && status >= 400) throw fail('upstream_navigation_error');
+          await observe(url, response); await active();
+          await route.fulfill({ response });
+        }
+      } finally { await response.dispose(); }
+    } catch (error) {
+      state.blockedRequests++;
+      if (top || method === 'POST' || error instanceof BrightspaceError && ['ACCOUNT_CHANGED', 'MYTU_SESSION_CHANGED'].includes(error.code)) {
+        state.failure = error instanceof BrightspaceError ? error : fail('guarded_transport_failed');
+      }
+      await route.abort('blockedbyclient').catch(() => undefined);
+    }
+  });
+  return state;
+}
+
+function gradeId(value: string): string {
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(value)) throw new BrightspaceError('INVALID_ID', 'Use an exact result identifier returned by list_official_grades.');
+  return value;
+}
+function text(value: unknown, max = 1000): string | undefined {
+  return typeof value === 'string' ? value.slice(0, max) : typeof value === 'number' && Number.isFinite(value) ? String(value) : undefined;
+}
+/** Fields used by the live public OSIRIS grade model; only allowlisted result data is returned. */
+export function officialGrade(value: unknown, expectedId?: string): Row {
+  const row = record(value), rawId = row.id_resultaat;
+  const id = typeof rawId === 'string' ? rawId : typeof rawId === 'number' && Number.isSafeInteger(rawId) ? String(rawId) : undefined;
+  if (!id || !/^[a-zA-Z0-9_-]{1,100}$/.test(id) || expectedId && id !== expectedId) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The student results API returned an unfamiliar result identifier.');
+  return { id, courseCode: text(row.cursus, 100), courseName: text(row.cursus_korte_naam), courseId: text(row.id_cursus, 100),
+    assessment: text(row.toets_omschrijving), assessmentCode: text(row.toets, 100),
+    result: text(row.resultaat, 100), resultDescription: text(row.resultaat_omschrijving),
+    score: text(row.score, 100), scoreDescription: text(row.score_omschrijving),
+    weight: text(row.weging, 100), assessmentDate: text(row.toetsdatum, 100), updatedAt: text(row.mutatiedatum, 100),
+    sourceUrl: ORIGIN + '/resultaten/' + encodeURIComponent(id) };
+}
+export function officialGrades(value: unknown, offset: number, limit: number): Row {
+  const body = record(value);
+  if (!Array.isArray(body.items) || body.items.length > limit || typeof body.hasMore !== 'boolean'
+    || body.offset !== undefined && body.offset !== offset || body.limit !== undefined && body.limit !== limit
+    || body.hasMore && body.items.length !== limit) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The student results API returned unfamiliar pagination.');
+  const items = body.items.map(item => officialGrade(item));
+  if (new Set(items.map(item => item.id)).size !== items.length) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The student results API returned duplicate result identifiers.');
+  return { source: 'official_osiris_api', provider: 'My TU Delft', sourceUrl: ORIGIN + '/resultaten', items,
+    offset, limit, count: Number.isSafeInteger(body.count) && Number(body.count) >= 0 ? body.count : undefined,
+    hasMore: body.hasMore, nextOffset: body.hasMore ? offset + limit : null, complete: offset === 0 && !body.hasMore,
+    fetchedAt: new Date().toISOString() };
+}
+
+export class MyTuDelft {
+  private loginState: MyTuLoginStatus = { state: 'idle', message: 'Run begin_mytu_login to connect official TU Delft results.' };
+  private generation = 0;
+  private starting?: Promise<MyTuLoginStatus>;
+  private loginTask?: Promise<void>;
+  private browser?: Browser;
+  private currentAccount?: string;
+  private closing?: Promise<void>;
+  private loggingOut = false;
+  private logoutTask?: Promise<void>;
+  constructor(private readonly auth: Auth, private readonly client: Client) {}
+  status(): MyTuLoginStatus { return structuredClone(this.loginState); }
+  private vault(accountId: string): Vault<Session> { return new Vault(this.auth.config.dataDir, 'mytu-' + digest(this.auth.config.baseUrl + ':' + accountId).slice(0, 20)); }
+  private async identity(): Promise<MyTuIdentity> {
+    if (this.auth.config.baseUrl !== 'https://brightspace.tudelft.nl') throw new BrightspaceError('MYTU_IDENTITY_UNVERIFIED', 'This connector requires the TU Delft Brightspace account.');
+    const accountId = await this.client.sessionIdentity();
+    if (!accountId) throw new BrightspaceError('AUTH_REQUIRED', 'Verify your Brightspace account before connecting My TU Delft.');
+    const me = record(await this.client.json('lp', 'users/whoami'));
+    if (str(me.Identifier) !== accountId) throw new BrightspaceError('ACCOUNT_CHANGED', 'The Brightspace account changed before My TU Delft access.');
+    let detail: Row = {};
+    try { detail = record(await this.client.json('lp', 'users/' + accountId)); }
+    catch (error) { if (!(error instanceof BrightspaceError) || !['PERMISSION_DENIED', 'NOT_FOUND'].includes(error.code)) throw error; }
+    if (Object.keys(detail).length && str(detail.UserId) !== accountId) throw new BrightspaceError('ACCOUNT_CHANGED', 'The Brightspace user response did not match the current account.');
+    if (await this.client.sessionIdentity() !== accountId) throw new BrightspaceError('ACCOUNT_CHANGED', 'The Brightspace account changed before My TU Delft access.');
+    const studentNumbers = [...new Set([number(me.OrgDefinedId), number(detail.OrgDefinedId)].filter((id): id is string => Boolean(id)))];
+    if (studentNumbers.length > 1) throw new BrightspaceError('MYTU_IDENTITY_UNVERIFIED', 'Brightspace returned conflicting institutional student identifiers.');
+    this.currentAccount = accountId; return { accountId, studentNumbers, institutionalEmail: institutionalEmail(me.UniqueName) };
+  }
+  private async active(accountId: string, generation: number): Promise<void> {
+    if (generation !== this.generation) throw new BrightspaceError('MYTU_SESSION_CHANGED', 'The My TU Delft connection was closed or changed.');
+    const current = await this.client.sessionIdentity();
+    if (generation !== this.generation) throw new BrightspaceError('MYTU_SESSION_CHANGED', 'The My TU Delft connection was closed or changed.');
+    if (current !== accountId) throw new BrightspaceError('ACCOUNT_CHANGED', 'The Brightspace account changed during My TU Delft access.');
+  }
+  async beginLogin(): Promise<MyTuLoginStatus> {
+    if (this.closing || this.loggingOut) throw new BrightspaceError('MYTU_SESSION_CHANGED', 'The My TU Delft connection is closing. Retry after it finishes.');
+    if (this.starting) return this.starting;
+    if (this.loginTask) return this.status();
+    const generation = this.generation;
+    this.starting = (async () => {
+      const expected = await this.identity(); await this.active(expected.accountId, generation);
+      this.loginState = { state: 'waiting', message: 'Complete the normal My TU Delft student login and MFA in the browser. Your password stays in that browser.' };
+      this.loginTask = this.login(expected, generation).catch((error: unknown) => {
+        this.loginState = { state: 'failed', message: error instanceof BrightspaceError ? error.message : 'The My TU Delft login could not finish.',
+          error: safeError(error) };
+      }).finally(() => { this.loginTask = undefined; });
+      return this.status();
+    })().finally(() => { this.starting = undefined; });
+    return this.starting;
+  }
+  private async login(expected: MyTuIdentity, generation: number): Promise<void> {
+    const vault = this.vault(expected.accountId), fingerprint = await vault.fingerprint();
+    let browser: Browser | undefined;
+    try {
+      await this.active(expected.accountId, generation);
+      browser = await chromium.launch({ headless: false, channel: this.auth.config.browserChannel }); this.browser = browser;
+      await this.active(expected.accountId, generation);
+      // A clean separate context: no Brightspace, SSO, password-manager or existing OSIRIS storage is copied.
+      const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false });
+      await context.routeWebSocket('**/*', socket => socket.close());
+      let candidate: Token | undefined;
+      const guard = await guardMyTuLogin(context, () => this.active(expected.accountId, generation), async (url, response) => {
+        if (url.origin === ORIGIN && url.pathname === API + '/token' && response.status() === 200) {
+          if (!(response.headers()['content-type'] ?? '').includes('json')) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft token response was not JSON.');
+          const bytes = await response.body();
+          if (bytes.length > 64_000) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft token response exceeded its read limit.');
+          let data: unknown; try { data = JSON.parse(bytes.toString('utf8')); } catch { throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft token response could not be read.'); }
+          candidate = tokenFrom(data);
+        }
+      });
+      const page = await context.newPage();
+      const current = async (): Promise<void> => {
+        await this.active(expected.accountId, generation);
+        if (guard.failure) throw guard.failure;
+        if (page.isClosed()) throw new BrightspaceError('MYTU_LOGIN_CANCELLED', 'The My TU Delft login browser was closed.');
+      };
+      await page.goto(ORIGIN + '/', { waitUntil: 'domcontentloaded', timeout: this.auth.config.timeoutMs });
+      const deadline = Date.now() + LOGIN_MS;
+      while (Date.now() < deadline) {
+        await current();
+        if (candidate) {
+          const token = candidate;
+          const verified = await this.providerIdentity(expected, token.accessToken, current);
+          await current();
+          await vault.save({ version: 1, brightspaceOrigin: this.auth.config.baseUrl, accountId: expected.accountId, providerOrigin: ORIGIN,
+            ...token, studentHash: verified.studentHash, identityMethod: verified.method, savedAt: new Date().toISOString() }, fingerprint, () => {
+            if (generation !== this.generation || page.isClosed()) throw new BrightspaceError('MYTU_LOGIN_CANCELLED', 'The My TU Delft login was cancelled before saving.');
+          });
+          await current();
+          this.loginState = { state: 'connected', identityMethod: verified.method, message: verified.method === 'institutional_student_number'
+            ? 'My TU Delft is connected and matched to your Brightspace student number.'
+            : 'My TU Delft is connected and matched to your Brightspace institutional email address.' }; return;
+        }
+        await page.waitForTimeout(750);
+      }
+      throw new BrightspaceError('MYTU_LOGIN_TIMEOUT', 'The My TU Delft login timed out. Run begin_mytu_login again.');
+    } finally { await browser?.close().catch(() => undefined); if (this.browser === browser) this.browser = undefined; }
+  }
+  private async api(path: string, token: string): Promise<unknown> {
+    if (path !== '/gebruiker' && path !== '/student/contactgegevens'
+      && !/^\/student\/resultaten(?:\/[a-zA-Z0-9_-]{1,100})?(?:\?offset=\d+&limit=\d+)?$/.test(path)) throw new BrightspaceError('MYTU_TARGET_UNVERIFIED', 'This is not an approved own-student result endpoint.');
+    let response: Response;
+    try { response = await fetch(ORIGIN + API + path, { method: 'GET', headers: { authorization: 'Bearer ' + token, accept: 'application/json', taal: 'EN', client_type: 'web' },
+      redirect: 'manual', signal: AbortSignal.timeout(this.auth.config.timeoutMs) }); }
+    catch { throw new BrightspaceError('MYTU_UNAVAILABLE', 'The student results service could not be reached.'); }
+    try {
+      if (response.status === 401 || response.status >= 300 && response.status < 400) throw new BrightspaceError('MYTU_AUTH_REQUIRED', 'Run begin_mytu_login to reconnect to My TU Delft.');
+      if (response.status === 403) throw new BrightspaceError('MYTU_PERMISSION_DENIED', 'The student results service did not permit this read.');
+      if (response.status === 404) throw new BrightspaceError('MYTU_NOT_FOUND', 'The student result was not found.');
+      if (!response.ok) throw new BrightspaceError('MYTU_UNAVAILABLE', 'The student results service returned an error.', { status: response.status });
+      if (!(response.headers.get('content-type') ?? '').includes('json')) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The student results service did not return JSON.');
+      if (Number(response.headers.get('content-length') ?? 0) > MAX_BYTES) throw new BrightspaceError('MYTU_LIMIT', 'The student results response exceeded its read limit.');
+      const reader = response.body?.getReader(); if (!reader) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The student results response was empty.');
+      const chunks: Uint8Array[] = []; let length = 0;
+      try { while (true) { const { value, done } = await reader.read(); if (done) break; length += value.byteLength; if (length > MAX_BYTES) throw new BrightspaceError('MYTU_LIMIT', 'The student results response exceeded its read limit.'); chunks.push(value); } }
+      finally { await reader.cancel().catch(() => undefined); }
+      try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+      catch { throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The student results JSON could not be read.'); }
+    } finally { if (!response.body?.locked) await response.body?.cancel().catch(() => undefined); }
+  }
+  private async providerIdentity(expected: MyTuIdentity, token: string, current: () => Promise<void>): Promise<VerifiedIdentity> {
+    const user = record(await this.api('/gebruiker', token)); await current();
+    // Do not read contact details when a student-number comparison settles the match,
+    // or when the email/student prerequisites already prove that the fallback cannot work.
+    const expectedEmail = institutionalEmail(expected.institutionalEmail), accountEmail = institutionalEmail(user.e_mailadres);
+    if (expected.studentNumbers.length || !number(user.studentnummer) || !expectedEmail || !accountEmail
+      || expectedEmail !== accountEmail || user.toegang_applicatie !== undefined && user.toegang_applicatie !== 'J') {
+      return matchMyTuIdentity(expected, user);
+    }
+    const contact = record(await this.api('/student/contactgegevens', token)); await current();
+    const matched = matchMyTuIdentity(expected, user, contact);
+    // Re-read the token's own account after contact verification. Persist only a
+    // stable student subject, and repeat the same check when a saved session is used.
+    const after = record(await this.api('/gebruiker', token)); await current();
+    const confirmed = matchMyTuIdentity(expected, after, contact);
+    if (confirmed.studentHash !== matched.studentHash) throw new BrightspaceError('MYTU_ACCOUNT_MISMATCH', 'The My TU Delft student identity changed during verification.');
+    return confirmed;
+  }
+  private async verified(): Promise<{ session: Session; current: () => Promise<void>; identityMethod: IdentityMethod }> {
+    const generation = this.generation, expected = await this.identity(), vault = this.vault(expected.accountId);
+    const fingerprint = await vault.fingerprint(), session = await vault.load();
+    if (!session || session.version !== 1 || session.providerOrigin !== ORIGIN || session.brightspaceOrigin !== this.auth.config.baseUrl
+      || session.accountId !== expected.accountId || typeof session.accessToken !== 'string' || !session.accessToken || session.accessToken.length > 32_000
+      || !Number.isFinite(session.expiresAt) || session.expiresAt <= Date.now()) throw new BrightspaceError('MYTU_AUTH_REQUIRED', 'Run begin_mytu_login to connect official TU Delft results.');
+    const current = async (): Promise<void> => {
+      await this.active(expected.accountId, generation);
+      if (await vault.fingerprint() !== fingerprint) throw new BrightspaceError('MYTU_SESSION_CHANGED', 'The saved My TU Delft session changed. Retry after checking authentication.');
+      await this.active(expected.accountId, generation);
+    };
+    await current();
+    const matched = await this.providerIdentity(expected, session.accessToken, current);
+    if (matched.studentHash !== session.studentHash) throw new BrightspaceError('MYTU_ACCOUNT_MISMATCH', 'The saved My TU Delft student identity changed. Reconnect with your current account.');
+    await current(); return { session, current, identityMethod: matched.method };
+  }
+  async checkAuth(): Promise<Row> {
+    const { current, identityMethod } = await this.verified(); await current();
+    return { connected: true, provider: 'My TU Delft', accountVerified: true, identityMethod, officialResults: true };
+  }
+  async grades(options: { offset?: number; limit?: number } = {}): Promise<Row> {
+    const offset = options.offset ?? 0, limit = options.limit ?? 25;
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new BrightspaceError('INVALID_RANGE', 'Use an offset between 0 and 1,000,000 and a limit between 1 and 100.');
+    const { session, current } = await this.verified();
+    const data = await this.api('/student/resultaten?offset=' + offset + '&limit=' + limit, session.accessToken);
+    await current(); return { ...officialGrades(data, offset, limit), accountVerified: true };
+  }
+  async grade(id: string): Promise<Row> {
+    id = gradeId(id); const { session, current } = await this.verified();
+    const item = officialGrade(await this.api('/student/resultaten/' + id, session.accessToken), id);
+    await current(); return { source: 'official_osiris_api', provider: 'My TU Delft', item, accountVerified: true, fetchedAt: new Date().toISOString() };
+  }
+  async close(): Promise<void> {
+    if (this.closing) return this.closing;
+    this.generation++;
+    this.closing = (async () => {
+      await this.browser?.close().catch(() => undefined);
+      await this.starting?.catch(() => undefined); await this.loginTask;
+      this.loginState = { state: 'idle', message: 'The My TU Delft connection is closed. Saved access is verified on the next read.' };
+    })().finally(() => { this.closing = undefined; });
+    return this.closing;
+  }
+  async logout(): Promise<void> {
+    if (this.logoutTask) return this.logoutTask;
+    this.loggingOut = true;
+    this.logoutTask = (async () => {
+      const account = await this.client.sessionIdentity().catch(() => undefined) ?? this.currentAccount;
+      await this.close(); if (account) await this.vault(account).clear();
+      this.loginState = { state: 'idle', message: 'The local My TU Delft login has been removed.' };
+    })().finally(() => { this.loggingOut = false; this.logoutTask = undefined; });
+    return this.logoutTask;
+  }
+}
