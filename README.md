@@ -2,7 +2,7 @@
 
 A local MCP server for everyday TU Delft coursework. Connect it to Codex or another MCP client, sign in through the normal university browser, then use course tools through your agent.
 
-This repository publishes the source for a personal connector. The core runs on your computer with your own Brightspace session, D2L APIs and scoped browser readers. It needs no hosted backend, dashboard, model API key or institutional OAuth application registration. Optional My TU Delft results and university email tools use separate logins; their live account compatibility is not yet verified. Session reuse is unofficial and may need maintenance when university services change.
+This repository publishes the source for a personal connector. The core runs on your computer with your own Brightspace session, D2L APIs and scoped browser readers. It needs no hosted backend, dashboard, model API key or institutional OAuth application registration. Optional My TU Delft results reuse the connector's saved TU Delft single sign-on (SSO) session where valid; university email uses a separate Microsoft login. Their live account compatibility is not yet verified. Session reuse is unofficial and may need maintenance when university services change.
 
 ## Install
 
@@ -21,6 +21,8 @@ npm run doctor
 ```
 
 Complete TU Delft sign-in and MFA in the opened browser. Passwords and MFA codes belong there, never in agent messages or tool arguments. `doctor` verifies the saved session without printing credentials.
+
+My TU Delft and Collegerama reuse TU Delft/SURF SSO cookies saved by this connector when starting their normal service login. An active university SSO session can avoid another password/MFA prompt; each service still establishes and verifies its own access. University expiry or reauthentication rules may require sign-in again. This uses the connector's saved login, not an import from your everyday browser profile.
 
 When the session expires, call `begin_login`, complete sign-in, then check `get_login_status` and `check_auth`. For a clean attempt, use `begin_login` with `fresh: true`, or `npm run login -- --fresh`. This starts from Brightspace without saved sign-in cookies. Failure preserves the previous session; replacing it requires verified identity. Begin from the service itself rather than a copied SSO callback URL.
 
@@ -72,7 +74,7 @@ Resolve names to exact IDs returned by tools. Course documents and web pages can
 | Announcements | `get_announcements`, `read_announcement_attachment` | Text, dates and exact attached files |
 | Assignments | `list_assignments`, `get_assignment`, `read_assignment_attachment` | Instructions, availability, own history and files |
 | Grades and discussions | `get_my_grades`, `read_discussions` | Brightspace grades and readable discussions |
-| Official results | `begin_mytu_login`, `get_mytu_login_status`, `check_mytu_auth`, `list_official_grades`, `get_official_grade`, `logout_mytu` | Separate My TU Delft login and own OSIRIS results; live identity/results validation pending |
+| Official results | `begin_mytu_login`, `get_mytu_login_status`, `check_mytu_auth`, `list_official_grades`, `get_official_grade`, `logout_mytu` | TU Delft SSO reuse, separate My TU Delft access and own OSIRIS results; live identity/results validation pending |
 | Email login | `begin_mail_login`, `get_mail_login_status`, `check_mail_auth`, `logout_mail` | Optional Microsoft Graph login, own-account verification and process-local session |
 | Email reading | `list_mail_folders`, `list_mail_messages`, `search_mail`, `read_mail` | Own folders, message search and bounded bodies; live mailbox validation pending |
 | Email drafts | `create_mail_reply_draft` | Save and verify an unsent reply draft requested by the student; live draft validation pending |
@@ -137,7 +139,7 @@ For a topic containing one supported Collegerama presentation link, start its se
 
 ## Official My TU Delft results
 
-Sign in to Brightspace first, then call `begin_mytu_login` and complete normal My TU Delft password/MFA in the opened browser. Poll `get_mytu_login_status` and use `check_mytu_auth` before reading results. The separate saved token must match the verified Brightspace student number or an exact institutional email that also matches the non-editable own contact record. The stable student identity is rechecked, and access is stored in an account-bound vault. Live identity matching and official-result retrieval have not yet been validated.
+Sign in to Brightspace first, then call `begin_mytu_login`. It opens My TU Delft from the service itself and reuses only unexpired secure TU Delft/SURF SSO cookies from the same saved Brightspace account. Complete password/MFA only if the university asks. Brightspace and existing OSIRIS service cookies, bearer tokens and local storage are not copied. Poll `get_mytu_login_status` and use `check_mytu_auth` before reading results. The separate saved token must match the verified Brightspace student number or an exact institutional email that also matches the non-editable own contact record. The stable student identity is rechecked, and access is stored in an account-bound vault. Live identity matching and official-result retrieval have not yet been validated.
 
 `list_official_grades` reads a page of OSIRIS results, with a default limit of 25 and maximum of 100. Follow `nextOffset` and retain coverage information. Use an exact returned result ID with `get_official_grade`. Missing or unpublished results are not inferred. These tools do not register courses or exams. `logout_mytu` removes the current account's local My TU Delft connection.
 

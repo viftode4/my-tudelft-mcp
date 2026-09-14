@@ -4,7 +4,7 @@ import { afterEach, mock, test } from 'node:test';
 import { setImmediate as immediate } from 'node:timers/promises';
 import { chromium, type APIResponse, type BrowserContext, type Route } from 'playwright';
 import { MyTuDelft, guardMyTuLogin, matchMyTuIdentity, myTuRequestAllowed, officialGrade, officialGrades } from '../src/mytudelft.js';
-import type { Auth } from '../src/auth.js';
+import type { Auth, BrowserState } from '../src/auth.js';
 import type { BrightspaceClient } from '../src/client.js';
 import { BrightspaceError } from '../src/errors.js';
 import { Vault } from '../src/vault.js';
@@ -22,19 +22,33 @@ const saved = () => ({ version: 1, brightspaceOrigin: 'https://brightspace.tudel
   accessToken: 'private-mytu-token', expiresAt: Date.now() + 3600000, studentHash: hash('1234567'), identityMethod: 'institutional_student_number', savedAt: new Date().toISOString() });
 afterEach(() => mock.restoreAll());
 
+function cookie(domain: string, extra: Partial<BrowserState['cookies'][number]> = {}): BrowserState['cookies'][number] {
+  return { domain, name: 'synthetic-session', value: 'private-cookie', path: '/', secure: true, httpOnly: true, sameSite: 'Lax', expires: -1, ...extra };
+}
+function brightspaceSession() {
+  return { origin: 'https://brightspace.tudelft.nl', identity: { id: '42', name: 'Synthetic Student' }, savedAt: 'synthetic',
+    bearer: 'private-brightspace-token', csrf: 'private-brightspace-csrf', storage: {
+      cookies: [cookie('.surfconext.nl'), cookie('engine.surfconext.nl'), cookie('login.tudelft.nl'), cookie('brightspace.tudelft.nl'),
+        cookie('my.tudelft.nl'), cookie('osiris-saml.tudelft.nl'), cookie('.tudelft.nl'), cookie('login.tudelft.nl.evil.example'),
+        cookie('login.tudelft.nl', { name: 'expired', expires: 1 }), cookie('engine.surfconext.nl', { name: 'insecure', secure: false })],
+      origins: [{ origin, localStorage: [{ name: 'token', value: 'private-existing-mytu-token' }] },
+        { origin: 'https://brightspace.tudelft.nl', localStorage: [{ name: 'token', value: 'private-brightspace-token' }] }] } };
+}
+
 function fixture() {
   const state: any = { accountId: '42', studentNumber: '1234567', uniqueName: 'synthetic-netid', ownUserDenied: false,
     contact: {}, afterContact: undefined, provider: saved(), fingerprint: 'initial', user: user(),
     rows: { items: [row()], hasMore: false, offset: 0, limit: 25, count: 1 }, calls: [], saved: [], cleared: 0, browserClosed: 0,
     launchOptions: undefined, contextOptions: undefined, tokenExposed: true, routeHandler: undefined, afterIdentity: undefined, afterGrades: undefined,
-    beforeSave: undefined, providerStatus: 200 };
+    beforeSave: undefined, providerStatus: 200, brightspace: brightspaceSession(), afterSession: undefined, afterLaunch: undefined, navigationUrls: [] };
   const client = { config: { baseUrl: 'https://brightspace.tudelft.nl' },
     sessionIdentity: async () => state.accountId,
     json: async (_product: string, path: string) => {
       if (path === 'users/whoami') return { Identifier: '42', UniqueName: state.uniqueName };
       assert.equal(path, 'users/42'); if (state.ownUserDenied) throw new BrightspaceError('PERMISSION_DENIED', 'Synthetic denied own-user profile.'); return { UserId: 42, OrgDefinedId: state.studentNumber };
     } } as unknown as BrightspaceClient;
-  const auth = { config: { baseUrl: 'https://brightspace.tudelft.nl', dataDir: 'unused-mytu-test-vault', timeoutMs: 1000 } } as Auth;
+  const auth = { config: { baseUrl: 'https://brightspace.tudelft.nl', dataDir: 'unused-mytu-test-vault', timeoutMs: 1000 },
+    session: async () => { const snapshot = structuredClone(state.brightspace); await state.afterSession?.(); return snapshot; } } as unknown as Auth;
   const reader = new MyTuDelft(auth, client);
   mock.method(Vault.prototype, 'fingerprint', async () => state.fingerprint);
   mock.method(Vault.prototype, 'load', async () => state.provider);
@@ -54,7 +68,8 @@ function fixture() {
     return Response.json(url.pathname.endsWith('/synthetic-result-1') ? row() : state.rows);
   });
   const page = { isClosed: () => state.browserClosed > 0,
-    goto: async () => {
+    goto: async (url: string) => {
+      state.navigationUrls.push(url);
       if (!state.tokenExposed) return;
       const bytes = Buffer.from(JSON.stringify({ access_token: 'private-mytu-token', expires_in: 3600, token_type: 'bearer' }));
       const response = { status: () => 200, headers: () => ({ 'content-type': 'application/json' }), body: async () => bytes, dispose: async () => undefined };
@@ -68,6 +83,7 @@ function fixture() {
     routeWebSocket: async () => undefined, newPage: async () => page };
   mock.method(chromium, 'launch', async (options: any) => {
     state.launchOptions = options;
+    await state.afterLaunch?.();
     return { newContext: async (options: any) => { state.contextOptions = options; return context; },
       close: async () => { state.browserClosed++; } } as any;
   });
@@ -192,14 +208,57 @@ test('redirect interception blocks foreign destinations and POST replays with sa
   const foreign = await guarded('POST', '', 200, 'https://evil.example/private'); assert.equal(foreign.fetched, 0);
 });
 
-test('login uses a clean visible browser and saves only verified provider credentials', async () => {
+test('login reuses only scoped unexpired secure SSO cookies and saves only verified provider credentials', async () => {
   const { reader, state } = fixture(); state.provider = null;
   assert.equal((await reader.beginLogin()).state, 'waiting'); await finished(reader);
   assert.equal(reader.status().state, 'connected'); assert.equal(state.launchOptions.headless, false);
-  assert.equal('storageState' in state.contextOptions, false); assert.equal(state.saved.length, 1);
+  assert.deepEqual(state.contextOptions.storageState, { cookies: state.brightspace.storage.cookies.slice(0, 3), origins: [] });
+  assert.deepEqual(state.navigationUrls, [origin + '/']); assert.equal(state.saved.length, 1);
   assert.equal(state.saved[0].accountId, '42'); assert.equal(state.saved[0].studentHash, hash('1234567'));
   assert.equal(state.saved[0].accessToken, 'private-mytu-token'); assert.equal('storage' in state.saved[0], false);
   assert.equal(JSON.stringify(reader.status()).includes('private-'), false); assert.ok(state.browserClosed > 0); await reader.close();
+});
+
+test('missing or expired SSO cookies still allow normal service-initiated sign-in', async () => {
+  const { reader, state } = fixture();
+  state.brightspace.storage.cookies = [cookie('brightspace.tudelft.nl'), cookie('login.tudelft.nl', { expires: 1 })];
+  await reader.beginLogin(); await finished(reader);
+  assert.deepEqual(state.contextOptions.storageState, { cookies: [], origins: [] });
+  assert.deepEqual(state.navigationUrls, [origin + '/']); assert.equal(reader.status().state, 'connected');
+  await reader.close();
+});
+
+test('an unbound or different saved account cannot seed My TU Delft SSO', async () => {
+  for (const change of [(saved: any) => { saved.identity.id = '99'; }, (saved: any) => { delete saved.identity; },
+    (saved: any) => { saved.origin = 'https://other.example'; }]) {
+    mock.restoreAll(); const { reader, state } = fixture(); change(state.brightspace);
+    await reader.beginLogin(); await finished(reader);
+    assert.equal(reader.status().error?.code, 'ACCOUNT_CHANGED'); assert.equal(state.launchOptions, undefined);
+    assert.equal(state.calls.length, 0); assert.equal(state.saved.length, 0); await reader.close();
+  }
+});
+
+test('an account change during SSO snapshot loading stops before browser launch', async () => {
+  const { reader, state } = fixture(); state.afterSession = () => { state.accountId = '99'; };
+  await reader.beginLogin(); await finished(reader);
+  assert.equal(reader.status().error?.code, 'ACCOUNT_CHANGED'); assert.equal(state.launchOptions, undefined);
+  assert.equal(state.calls.length, 0); assert.equal(state.saved.length, 0); await reader.close();
+});
+
+test('closing during SSO snapshot loading prevents browser launch and persistence', async () => {
+  const { reader, state } = fixture(); let release!: () => void;
+  state.afterSession = () => new Promise<void>(resolve => { release = resolve; });
+  await reader.beginLogin();
+  for (let i = 0; i < 50 && !release; i++) await immediate(); assert.equal(typeof release, 'function');
+  const closing = reader.close(); release(); await closing;
+  assert.equal(state.launchOptions, undefined); assert.equal(state.calls.length, 0); assert.equal(state.saved.length, 0);
+});
+
+test('an account change during browser launch prevents use of the captured SSO cookies', async () => {
+  const { reader, state } = fixture(); state.afterLaunch = () => { state.accountId = '99'; };
+  await reader.beginLogin(); await finished(reader);
+  assert.equal(reader.status().error?.code, 'ACCOUNT_CHANGED'); assert.equal(state.contextOptions, undefined);
+  assert.ok(state.browserClosed > 0); assert.equal(state.calls.length, 0); assert.equal(state.saved.length, 0); await reader.close();
 });
 
 test('failed provider identity leaves the previous encrypted session intact', async () => {

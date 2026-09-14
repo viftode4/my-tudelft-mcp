@@ -242,7 +242,7 @@ export class MyTuDelft {
     const generation = this.generation;
     this.starting = (async () => {
       const expected = await this.identity(); await this.active(expected.accountId, generation);
-      this.loginState = { state: 'waiting', message: 'Complete the normal My TU Delft student login and MFA in the browser. Your password stays in that browser.' };
+      this.loginState = { state: 'waiting', message: 'Opening My TU Delft using your saved TU Delft single sign-on session. Complete sign-in or MFA in the browser only if the university asks.' };
       this.loginTask = this.login(expected, generation).catch((error: unknown) => {
         this.loginState = { state: 'failed', message: error instanceof BrightspaceError ? error.message : 'The My TU Delft login could not finish.',
           error: safeError(error) };
@@ -256,10 +256,19 @@ export class MyTuDelft {
     let browser: Browser | undefined;
     try {
       await this.active(expected.accountId, generation);
+      const saved = await this.auth.session();
+      await this.active(expected.accountId, generation);
+      if (saved.origin !== this.auth.config.baseUrl || saved.identity?.id !== expected.accountId) {
+        throw new BrightspaceError('ACCOUNT_CHANGED', 'The saved Brightspace account changed before My TU Delft sign-in. Check your Brightspace login first.');
+      }
+      // Reuse only TU/SURF SSO cookies on their original domains. Service cookies,
+      // bearer tokens and local storage stay separate; SSO does not prove account identity.
+      const cookies = saved.storage.cookies.filter(cookie =>
+        ['.surfconext.nl', 'engine.surfconext.nl', 'login.tudelft.nl'].includes(cookie.domain)
+        && cookie.secure && (cookie.expires === -1 || cookie.expires > Date.now() / 1000));
       browser = await chromium.launch({ headless: false, channel: this.auth.config.browserChannel }); this.browser = browser;
       await this.active(expected.accountId, generation);
-      // A clean separate context: no Brightspace, SSO, password-manager or existing OSIRIS storage is copied.
-      const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false });
+      const context = await browser.newContext({ storageState: { cookies, origins: [] }, serviceWorkers: 'block', acceptDownloads: false });
       await context.routeWebSocket('**/*', socket => socket.close());
       let candidate: Token | undefined;
       const guard = await guardMyTuLogin(context, () => this.active(expected.accountId, generation), async (url, response) => {

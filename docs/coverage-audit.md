@@ -11,7 +11,7 @@ This is a capability map for the local MCP source. It contains no student accoun
 | Announcements | Published text, dates and exact attachment reading/download | Visibility and dates follow upstream responses |
 | Assignments | Instructions, availability, current-user history and readable feedback | Missing fields or history do not establish absence of work |
 | Brightspace grades | Current student's readable Brightspace grades | Separate from official OSIRIS results |
-| Official My TU Delft results | Separate normal login, account-bound saved token, paginated OSIRIS results and exact result detail | Live student identity matching and result retrieval remain unverified; no course/exam registration |
+| Official My TU Delft results | Normal service login with scoped TU Delft SSO reuse, account-bound saved token, paginated OSIRIS results and exact result detail | Live student identity matching and result retrieval remain unverified; no course/exam registration |
 | Lecture material | Bounded PDF, Office, tabular, notebook, text and caption extraction | No OCR or speech transcription; unsupported formats and truncation are explicit |
 | Search | Per-account index, retrieval timestamps and exact read targets | Only retrieved text is searched; removed items can remain cached |
 | Upcoming work | Sourced assignment, quiz, calendar and announcement overview | No completion inference; deadlines and access closing are distinguished |

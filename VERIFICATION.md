@@ -9,7 +9,7 @@ The current source passed on Windows with Node 25 and PowerShell 7:
 | Check | Result |
 | --- | --- |
 | `npm run check` | Passed |
-| `npm test` | 415 passed, 0 failed, 0 skipped |
+| `npm test` | 420 passed, 0 failed, 0 skipped |
 | `npm run build` | Passed |
 | `npm audit` | No known vulnerabilities at the recorded check |
 | MCP interface | 65 tools; startup/shutdown and structured JSON-RPC output covered |
@@ -31,7 +31,7 @@ Tests use synthetic documents, mocked responses and locally served browser fixtu
 - Course/group enrollment and file/text submission previews, one-use confirmation, stale-target rejection and receipt verification.
 - Recording discovery, caption association, hidden-parent suppression and output limits.
 - Separate Collegerama guards, identity matching, redirects, cancellation and metadata parsing.
-- Separate My TU Delft login, exact official-result routes, identity matching, pagination and guarded token storage.
+- My TU Delft SSO cookie isolation, missing/expired-cookie fallback, account changes and cancellation during SSO loading/browser launch, exact official-result routes, identity matching, pagination and guarded token storage.
 - Own-mailbox Graph routes, institutional identity/tenant checks, process-local sessions, bounded pagination, unsent draft verification and unknown-write outcomes.
 - MCP schemas and cleanup across linked services, including continued logout after another provider's local cleanup fails.
 
@@ -62,6 +62,8 @@ Fresh interactive Brightspace login completion after the latest recovery changes
 Separate GSE LTI access remains pending. Collegerama login and metadata handling have automated coverage, but successful live provider identity/metadata compatibility remains unverified. Recording links do not establish playback or transcript access.
 
 My TU Delft results and university email are implemented, but successful live account checks remain pending. The My TU Delft browser flow has reached the normal university password form; that does not prove completed authentication, cross-service account matching or access to official grades. Email uses the official Microsoft Graph PowerShell application; university consent restrictions may still prevent access. No live email draft has been created or sent.
+
+My TU Delft now starts its normal service login with scoped SSO cookies from the connector's verified Brightspace account. Automated coverage establishes cookie isolation and account checks; it does not establish that an existing university SSO session will still be accepted by the provider. A bounded live attempt with saved SSO did not complete within one minute; it established neither a successful connection nor the reason for the incomplete sign-in.
 
 No real course enrollment, group join or assignment submission was performed as part of the documented validation. Confirmation handling is tested with synthetic or intercepted requests; live preview success does not prove a persisted write will succeed. Limited group-history permissions may prevent detection of concurrent teammate changes.
 
