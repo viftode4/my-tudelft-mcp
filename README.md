@@ -2,9 +2,11 @@
 
 A local MCP server for everyday TU Delft coursework. Connect it to Codex or another MCP client, sign in through the normal university browser, then use course tools through your agent.
 
-This repository publishes the source for a personal connector. The core runs on your computer with your own Brightspace session, D2L APIs and scoped browser readers. It needs no hosted backend, dashboard, model API key or institutional OAuth application registration. Optional My TU Delft results reuse the connector's saved TU Delft single sign-on (SSO) session where valid; university email uses a separate Microsoft login. Their live account compatibility is not yet verified. Session reuse is unofficial and may need maintenance when university services change.
+This repository publishes the source for a personal connector. The core runs on your computer with your own Brightspace session, D2L APIs and scoped browser readers. It needs no hosted backend, dashboard, model API key or institutional OAuth application registration. Optional My TU Delft tools reuse the connector's saved TU Delft single sign-on (SSO) session where valid; university email uses a separate Microsoft login. My TU Delft account linking and selected academic reads have live validation; university email compatibility remains pending. Session reuse is unofficial and may need maintenance when university services change.
 
 ## Install
+
+**Installing with an AI agent?** Give it this repository URL and ask it to follow [AGENTS.md](AGENTS.md) and the [agent installation runbook](docs/agent-install.md). It can install dependencies, build, generate your machine's MCP configuration and verify startup. Initial university authentication and MFA still belong to you in the browser.
 
 Requires Node.js 22.13 or later with built-in SQLite support, npm, and a graphical session for login. Automated CI for the published core passed on Ubuntu, Windows and macOS. This does not establish live sign-in compatibility or optional email dependency support on every platform.
 
@@ -22,9 +24,13 @@ npm run doctor
 
 Complete TU Delft sign-in and MFA in the opened browser. Passwords and MFA codes belong there, never in agent messages or tool arguments. `doctor` verifies the saved session without printing credentials.
 
-My TU Delft and Collegerama reuse TU Delft/SURF SSO cookies saved by this connector when starting their normal service login. An active university SSO session can avoid another password/MFA prompt; each service still establishes and verifies its own access. University expiry or reauthentication rules may require sign-in again. This uses the connector's saved login, not an import from your everyday browser profile.
+Brightspace, My TU Delft and Collegerama share an account-bound TU Delft/SURF SSO cookie store. After a service verifies the linked account, it saves refreshed SSO cookies for subsequent service connections. Windows protects this state with DPAPI. Service cookies and tokens remain separate; the connector does not import your everyday browser profile.
 
-When the session expires, call `begin_login`, complete sign-in, then check `get_login_status` and `check_auth`. For a clean attempt, use `begin_login` with `fresh: true`, or `npm run login -- --fresh`. This starts from Brightspace without saved sign-in cookies. Failure preserves the previous session; replacing it requires verified identity. Begin from the service itself rather than a copied SSO callback URL.
+Brightspace read requests try normal token renewal, then silent shared SSO. My TU Delft verifies each saved token live and, when it expires, tries the web application's cookie renewal followed by silent SSO. Concurrent requests share one reconnection; failed automatic attempts have a short cooldown. Renewal runs when needed, without a background keep-alive service. A password/MFA requirement stops the silent attempt. Then call `begin_login` or `begin_mytu_login` once and complete the university prompt. The connector cannot extend the university's own session limits.
+
+After updating and building the connector, restart its MCP connection (or the host application) once to load the new code and tool list. Existing running processes keep their loaded code. The encrypted Brightspace, OSIRIS, shared SSO and timetable state survives that restart.
+
+For a clean attempt, use `begin_login` with `fresh: true`, or `npm run login -- --fresh`. This starts from Brightspace without saved sign-in cookies. Failure preserves the previous session; replacing it requires verified identity. Begin from the service itself rather than a copied SSO callback URL. Global local logout removes the shared sign-in; provider logout removes that provider's access, and automatic reads do not recreate an explicitly removed connection.
 
 ## Connect an MCP client
 
@@ -55,6 +61,7 @@ See the [official Codex MCP documentation](https://developers.openai.com/codex/m
 - "Read these lecture slides with page references."
 - "Index this course, then find material about the topic I'm revising."
 - "Show upcoming assignments, quiz dates and calendar events."
+- "Show next week's MyTimetable classes, rooms and exams alongside my Brightspace deadlines."
 - "Read my assignment feedback and reopen the matching submitted file."
 - "Show my project group, locker files and content progress."
 - "Read the public Study Guide for this exact course code and academic year."
@@ -74,7 +81,9 @@ Resolve names to exact IDs returned by tools. Course documents and web pages can
 | Announcements | `get_announcements`, `read_announcement_attachment` | Text, dates and exact attached files |
 | Assignments | `list_assignments`, `get_assignment`, `read_assignment_attachment` | Instructions, availability, own history and files |
 | Grades and discussions | `get_my_grades`, `read_discussions` | Brightspace grades and readable discussions |
-| Official results | `begin_mytu_login`, `get_mytu_login_status`, `check_mytu_auth`, `list_official_grades`, `get_official_grade`, `logout_mytu` | TU Delft SSO reuse, separate My TU Delft access and own OSIRIS results; live identity/results validation pending |
+| Official results | `begin_mytu_login`, `get_mytu_login_status`, `check_mytu_auth`, `list_official_grades`, `get_official_grade`, `logout_mytu` | TU Delft SSO reuse, separate account-bound My TU Delft access and own OSIRIS results |
+| Official study information | `get_official_progress`, `get_official_programme`, `list_official_registrations`, `get_official_profile`, `get_official_timetable` | Live progress, curriculum, profile and selected registrations verified; study advice/specialisations denied and timetable unavailable in the observed account |
+| Official registration | `search_official_courses`, `get_official_course`, `prepare_official_registration`, `confirm_official_registration` | Standard course/exam enrollment and withdrawal, exact previews, eligibility rechecks and receipt verification; live writes unverified |
 | Email login | `begin_mail_login`, `get_mail_login_status`, `check_mail_auth`, `logout_mail` | Optional Microsoft Graph login, own-account verification and process-local session |
 | Email reading | `list_mail_folders`, `list_mail_messages`, `search_mail`, `read_mail` | Own folders, message search and bounded bodies; live mailbox validation pending |
 | Email drafts | `create_mail_reply_draft` | Save and verify an unsent reply draft requested by the student; live draft validation pending |
@@ -84,6 +93,7 @@ Resolve names to exact IDs returned by tools. Course documents and web pages can
 | Group enrollment | `list_available_groups`, `prepare_group_enrollment`, `confirm_group_enrollment` | Native group discovery and previewed joining |
 | Linked services | `read_course_service` | Verified Study Guide continuation; GSE access remains pending |
 | Calendar and quizzes | `get_calendar`, `get_upcoming_deadlines`, `get_study_overview`, `list_quizzes` | Sourced dates and course overview |
+| Personal timetable | `connect_timetable`, `get_timetable_status`, `get_timetable`, `disconnect_timetable` | Calendar subscription reader with Delft times, rooms, recurrence changes and cancellations; authorized personal connection and live reads verified |
 | Lectures | `read_material`, `download_material` | Bounded extraction and optional downloads |
 | Recording discovery | `list_recordings` | Recording/caption links with provenance |
 | Collegerama | `begin_recording_login`, `get_recording_login_status`, `read_recording` | Separate login and metadata; live provider compatibility unverified |
@@ -93,7 +103,7 @@ Resolve names to exact IDs returned by tools. Course documents and web pages can
 | File submissions | `prepare_assignment_submission`, `confirm_assignment_submission` | Exact file previews and confirmed submission |
 | Text submissions | `prepare_text_submission`, `confirm_text_submission` | Literal-text previews and confirmed submission |
 
-The server exposes 65 tools. The `brightspace://usage` resource describes workflows; `course_briefing` supplies a sourced briefing template.
+The server exposes 78 tools. The `brightspace://usage` resource describes workflows; `course_briefing` supplies a sourced briefing template. Rebuild and reconnect the MCP client after updating so it discovers new tools.
 
 ## Reading and search
 
@@ -110,6 +120,30 @@ Locker listing reads one own-group folder at a time, with `nextStartAt` continua
 Sync cannot infer deletion from partial listings. Removed items can remain cached until `clear_local_index` and a new sync. Search identifies cached content and retrieval time.
 
 ## Dates and progress
+
+### Personal MyTimetable schedule
+
+Open [MyTimetable](https://mytimetable.tudelft.nl/schedule), sign in, and select the courses and groups that belong in your personal schedule. Use **Connect calendar** to obtain the personal iCalendar subscription URL. **Download iCalendar** produces a static export; use the subscription for updates. See the [university's instructions](https://mytimetable.tudelft.nl/help).
+
+An agent with browser access can retrieve this link for the student after an authorized MyTimetable sign-in. The mobile site's **Main menu → Connect to calendar app** exposes the subscription directly. Transfer it locally to `connect_timetable`; the student does not need to copy it into chat. A saved Brightspace session does not guarantee MyTimetable SSO remains valid, so the university may require a fresh interactive login. Passwords and MFA stay in that window.
+
+After a Brightspace login and build, connect the URL using `connect_timetable`. Treat the URL as a private credential. On Windows, copy it yourself and run this helper to transfer it locally without putting it in a chat transcript, command-line argument or plaintext file:
+
+```sh
+node scripts/connect-timetable.mjs --clipboard
+```
+
+The helper reads only when explicitly invoked. Without `--clipboard`, it accepts the URL on stdin. An agent should read the clipboard only when the student asks it to use the copied calendar link. The connector verifies the feed before saving and accepts only the TU Delft HTTPS `/ical` subscription endpoint, with no redirects or university credentials forwarded. Windows storage uses DPAPI encryption for the current Windows user; other platforms use owner-restricted files. The feed is bound locally to the verified Brightspace account. Its ownership is student-supplied, not independently certified by an identity API.
+
+`get_timetable_status` checks local configuration. `get_timetable` fetches fresh activities for `from` and `to` timestamps with explicit UTC offsets, up to 93 days apart. It returns UTC timestamps, Delft local times, locations, descriptions and cancellation status. Recurring events, exclusions and individually moved occurrences are expanded. Keep cancelled activities labelled as cancelled. Combine this output with `get_study_overview` for Brightspace deadlines while retaining their sources and any conflicting dates.
+
+Completeness covers parsing the current feed in the requested window, not every university activity or the entire academic year. Selected groups, provider filters and publication dates affect coverage; an empty result does not establish free time. Calendar subscription selections can differ from the timetables currently visible in the web/mobile view. The native connection page reports this; retain the distinction and do not silently change settings shared with existing calendars. Feed selections do not enroll the student in courses or exams. The separate OSIRIS timetable endpoint returned HTTP 501 during live checks; this reader uses MyTimetable independently.
+
+Feeds are limited to 4 MiB and 20,000 VEVENT components, output to 2,000 activities, and recurrence expansion to 100,000 steps. Parsing runs in a worker with an eight-second timeout and V8 heap limits. Oversized text/categories are clipped with warnings; unsupported `RANGE=THISANDFUTURE` changes or ambiguous malformed data fail explicitly. Event links, attachments and alarms are not followed or executed. An authorized personal subscription was connected and a two-week window read through the compiled MCP; displayed class times and rooms were compared with the native mobile view. This verifies the observed feed, not every provider configuration.
+
+`disconnect_timetable` and global `logout` remove the current account's saved URL. A normal MCP shutdown retains it. Local removal does not revoke the remote subscription; MyTimetable provides calendar-link reset controls. Rebuild and reconnect the MCP client after installing this update to discover the four timetable tools.
+
+### Brightspace dates and progress
 
 `get_study_overview` combines assignments, quizzes, calendar and announcements for up to 30 exact courses. It preserves conflicting dates and separates deadlines from access closing times. Calendar results retain server-supplied recurrence changes and Delft all-day semantics. Windows are limited to 366 days; bounds/fallbacks disclose partial coverage.
 
@@ -137,13 +171,27 @@ The optional Study Guide LTI reader verifies the registered callback and exact p
 
 For a topic containing one supported Collegerama presentation link, start its separate interactive login, poll status, then read metadata after verification. The reader checks both account identities and returns published title, description, duration and dates. Live provider compatibility remains unverified. Playback, media retrieval and caption/transcript contents are not implemented by this reader.
 
-## Official My TU Delft results
+## Official My TU Delft / OSIRIS
 
-Sign in to Brightspace first, then call `begin_mytu_login`. It opens My TU Delft from the service itself and reuses only unexpired secure TU Delft/SURF SSO cookies from the same saved Brightspace account. Complete password/MFA only if the university asks. Brightspace and existing OSIRIS service cookies, bearer tokens and local storage are not copied. Poll `get_mytu_login_status` and use `check_mytu_auth` before reading results. The separate saved token must match the verified Brightspace student number or an exact institutional email that also matches the non-editable own contact record. The stable student identity is rechecked, and access is stored in an account-bound vault. Live identity matching and official-result retrieval have not yet been validated.
+Sign in to Brightspace first, then call `begin_mytu_login`. It opens My TU Delft from the service itself and reuses only unexpired secure TU Delft/SURF SSO cookies bound to the same Brightspace account. Complete password/MFA only if the university asks. OSIRIS also retains its own secure service cookies. When its web `sessionCookie` indicator is present, renewal first uses `POST /student/osiris/token` with `{}`. A load-balancer cookie alone does not enable this operation. These cookies stay confined to My TU Delft; Brightspace bearer tokens and local storage are not copied there. Poll `get_mytu_login_status` and use `check_mytu_auth` before reading data. The separate saved token must match the verified Brightspace student number or an exact institutional email that also matches the non-editable own contact record.
 
-`list_official_grades` reads a page of OSIRIS results, with a default limit of 25 and maximum of 100. Follow `nextOffset` and retain coverage information. Use an exact returned result ID with `get_official_grade`. Missing or unpublished results are not inferred. These tools do not register courses or exams. `logout_mytu` removes the current account's local My TU Delft connection.
+If Brightspace does not expose a student number and the institutional email aliases differ, the student can explicitly link their exact OSIRIS student number using `confirmedStudentNumber`. Ask for that account confirmation before supplying this option. The link cannot override a conflicting Brightspace student number. It is retained across reconnection and bound to the same Brightspace account; every data operation checks the live OSIRIS student identity again. `logout_mytu` removes the current account's local My TU Delft connection and link.
+
+The login supports the current OSIRIS SAML code callback. An omitted token expiry is stored explicitly as unknown and the token remains usable while the live own-account check succeeds; the connector no longer imposes an artificial 30-minute cutoff. Explicit provider expiry is respected. Automatic reconnection checks the same linked student account before saving or returning data. Academic mutations are never replayed by session renewal.
+
+Interactive login, silent shared SSO into OSIRIS and Brightspace from fresh processes, the confirmed student link, saved-account verification, grade pagination/detail, programme progress/curriculum, profile, course/exam history, degree/minor registrations and course/exam search have been exercised with an authorized live account. Exact OSIRIS identifiers can contain colons; retain them unchanged.
+
+`list_official_grades` reads a page of OSIRIS results, with a default limit of 25 and maximum of 100. Follow `nextOffset` and retain coverage information. Use an exact returned result ID with `get_official_grade`. `get_official_progress` discovers programme/exam-phase IDs for `get_official_programme`; curriculum and study advice preserve the university's published fields. `list_official_registrations` reads courses, exams, degree programmes, minors and specialisations. Profile and timetable reads cover only the data this service publishes. Missing or unpublished records are not inferred.
+
+For standard course/exam registration, first use `search_official_courses`, then `get_official_course` to discover exact course-block IDs or exam opportunities. These IDs are separate from Brightspace course IDs. Call `prepare_official_registration` with the exact target and any assessment/teaching-method selections. For withdrawal, discover the exact existing registration with `list_official_registrations` first. Preparation only reads data; show the complete preview and obtain approval for the exact action, target and date before calling `confirm_official_registration` with its one-use token and `confirmed: true`. Tokens expire after five minutes. Confirmation rechecks identity, target, existing registration and eligibility, submits once, and verifies the resulting registration record. Uncertain outcomes require checking current registrations before retrying.
+
+Eligibility warnings, payment, admission forms, group preferences and course accommodation choices require the native My TU Delft workflow. Registration changes for degree programmes, minors and specialisations are not implemented. No real OSIRIS registration or withdrawal was performed during validation.
+
+Feature availability follows university permissions. In the observed account, study advice and specialisation endpoints returned HTTP 401 even though the identity endpoint continued to verify. The connector reports feature access denial without requiring a new login. The timetable endpoint returned HTTP 501 and is reported as unavailable in this service; this does not mean the student has no timetable.
 
 ## Optional university email
+
+The observed TU Delft account is currently blocked by Microsoft Conditional Access (error 53003) after successful sign-in. University administrator approval or an approved authentication configuration is needed. Email access is not verified; Brightspace, official results and MyTimetable work independently. Do not repeatedly retry this policy denial.
 
 Email needs PowerShell 7.4 or later available as `pwsh`. From the checkout, install the pinned official SDK module:
 
@@ -153,7 +201,7 @@ pwsh -NoProfile -File scripts/install-mail.ps1
 
 This installs `Microsoft.Graph.Authentication` version `2.39.0` under ignored `.local/powershell/Modules`. Installation performs no login. Brightspace and My TU Delft tools do not require this optional dependency.
 
-After Brightspace login, call `begin_mail_login`, finish the normal Microsoft sign-in, poll `get_mail_login_status`, then call `check_mail_auth`. The official SDK requests delegated `User.Read` and `Mail.ReadWrite` for profile verification, own-mailbox reading and unsent drafts. It requests no `Mail.Send` permission and requires no custom application registration. TU Delft's consent policy may require administrator approval; a successful login or mailbox read has not yet been verified. The SDK connection lasts only for this MCP process, so sign in again after restarting it.
+After Brightspace login, call `begin_mail_login` and poll `get_mail_login_status`. The same device-code flow is used on Windows and macOS: the default browser opens Microsoft's sign-in page, and login status supplies `verificationUrl` and `userCode`. Show both to the user, who enters the code and completes sign-in/MFA in the browser. If the browser cannot open (including remote/headless sessions), the link and code work in another browser. Codes expire with the pending login and are cleared on success, failure, or logout. Then call `check_mail_auth`. The official SDK requests delegated `User.Read` and `Mail.ReadWrite` for profile verification, own-mailbox reading and unsent drafts. It requests no `Mail.Send` permission and requires no custom application registration. TU Delft's consent policy may require administrator approval; live authentication and mailbox access depend on the university allowing this sign-in flow. The SDK connection lasts only for this MCP process, so sign in again after restarting it.
 
 Use `list_mail_folders`, `list_mail_messages`, `search_mail` and `read_mail` for your own mailbox. Message lists default to the inbox; list/search pages allow up to 50 messages. Continue with the same query's opaque `nextCursor`. Microsoft Graph mail search is capped at 1,000 results, and bodies/recipients have explicit output limits. Reads do not mark messages as read or download attachments.
 
@@ -182,7 +230,7 @@ To remove all connector data, stop its process and remove only its runtime data 
 
 ## Scope and development
 
-Official course/exam registration, separate timetables, discussion posting, graded quiz attempts, OCR and speech transcription are not implemented. Email sending and attachment operations are unsupported. My TU Delft results and university email reading/reply drafts are implemented but still await live login and account validation. Brightspace grades remain separate from official OSIRIS results, and GSE LTI remains pending. See the [coverage audit](docs/coverage-audit.md) and [verification notes](VERIFICATION.md).
+Discussion posting, graded quiz attempts, OCR and speech transcription are not implemented. Email sending and attachment operations are unsupported. My TU Delft grades, study data and standard course/exam registration have automated coverage; selected academic reads are verified live, while registration writes remain unverified. Advanced registration flows use the native university interface. University email reading/reply drafts await live account validation. Brightspace grades remain separate from official OSIRIS results, and GSE LTI remains pending. See the [coverage audit](docs/coverage-audit.md) and [verification notes](VERIFICATION.md).
 
 ```sh
 npm run check
@@ -198,7 +246,8 @@ Tests use synthetic fixtures. Optional live scripts require deliberate use of yo
 - `node scripts/smoke-recordings-live.mjs <courseId> [courseId...]`: bounded link discovery.
 - `node scripts/smoke-course-workflows-live.mjs <local-targets.json>`: public guide, progress, locker reads and synthetic text previews.
 - `node scripts/login-recordings.mjs <courseId> <topicId>`: interactive provider login and metadata check.
-- `node scripts/login-mytudelft.mjs`: separate My TU Delft sign-in and bounded official-results verification.
+- `node scripts/login-mytudelft.mjs`: separate My TU Delft sign-in and bounded official-results verification. Use `--confirmed-student-number=<number>` only after the student explicitly confirms the account link.
+- `node scripts/smoke-mytudelft-live.mjs`: checks the saved OSIRIS account, bounded grades/progress/registration reads and available course/exam previews. Reports field names and coverage under ignored `.local/`; never confirms a registration.
 - `node scripts/login-mail.mjs`: Microsoft sign-in, a small inbox sample and mail search; reports no message content and closes its process-local email session afterward. Creates no draft and sends no email.
 
 Smoke scripts do not confirm actions. Do not publish target IDs, outputs or traces. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).

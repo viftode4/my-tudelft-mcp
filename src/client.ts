@@ -101,7 +101,15 @@ export class BrightspaceClient {
         if (latest.bearer && latest.bearer !== expiredBearer) return true;
       }
       const bearer = await mintToken(this.context!, this.config, this.state?.csrf).catch(() => undefined);
-      if (!bearer) return false;
+      if (!bearer) {
+        const accountId = this.state?.identity?.id;
+        if (!accountId || this.config.baseUrl !== 'https://brightspace.tudelft.nl' || !await this.auth.renewSso(accountId)) return false;
+        const reconnected = await this.auth.session(); this.assertSameAccount(reconnected);
+        const context = await request.newContext({ storageState: reconnected.storage, timeout: this.config.timeoutMs });
+        if (this.context) this.retired.add(this.context);
+        this.context = context; this.state = reconnected;
+        return true;
+      }
       this.state = { ...this.state!, bearer, storage: await this.context!.storageState(), savedAt: new Date().toISOString() };
       await this.auth.vault.save(this.state);
       return true;

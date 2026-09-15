@@ -20,6 +20,7 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "cheerio": "1.2.0",
     "fflate": "0.8.3",
+    "ical.js": "2.2.1",
     "mammoth": "1.12.3",
     "pdfjs-dist": "6.3.289",
     "playwright": "1.63.0",

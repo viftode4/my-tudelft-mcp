@@ -30,15 +30,20 @@ try {
   const start = await call('begin_mail_login');
   report({ tool: 'begin_mail_login', state: start.state, message: start.message });
   const deadline = Date.now() + 12 * 60_000;
-  let previous = start.state, connected = false;
+  let previous = start.state, connected = false, previousCode;
   while (Date.now() < deadline) {
     const status = await call('get_mail_login_status');
+    if (status.userCode && status.userCode !== previousCode) {
+      // Ephemeral sign-in instructions go to the terminal, never the saved report.
+      console.log(JSON.stringify({ verificationUrl: status.verificationUrl, userCode: status.userCode }));
+      previousCode = status.userCode;
+    }
     if (status.state !== previous) {
       report({ tool: 'get_mail_login_status', state: status.state, message: status.message,
         error: status.error ? failure(status.error) : undefined });
       previous = status.state;
     }
-    if (status.state === 'failed') throw new Error('Email login stopped. Check the safe status and Microsoft login window.');
+    if (status.state === 'failed') throw new Error('Email login stopped. Check the safe status and Microsoft browser login.');
     if (status.state === 'connected') { connected = true; break; }
     await new Promise(resolve => setTimeout(resolve, 2000));
   }

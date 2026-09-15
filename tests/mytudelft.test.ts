@@ -8,6 +8,7 @@ import type { Auth, BrowserState } from '../src/auth.js';
 import type { BrightspaceClient } from '../src/client.js';
 import { BrightspaceError } from '../src/errors.js';
 import { Vault } from '../src/vault.js';
+import { ssoCookies } from '../src/sso.js';
 
 const origin = 'https://my.tudelft.nl', api = origin + '/student/osiris';
 const oauth = 'https://osi-auth-server-prd.osiris-link.nl', saml = 'https://osiris-saml.tudelft.nl';
@@ -15,7 +16,7 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 // Every account/result/value in these tests is synthetic.
 const expected = { accountId: '42', studentNumbers: ['1234567'] };
 const user = () => ({ studentnummer: 1234567, toegang_applicatie: 'J', naam: 'Synthetic Student', private_profile_field: 'private-profile' });
-const row = () => ({ id_resultaat: 'synthetic-result-1', cursus: 'EXAMPLE1000', cursus_korte_naam: 'Synthetic Course', id_cursus: 'synthetic-course',
+const row = () => ({ id_resultaat: 'scto:901', cursus: 'EXAMPLE1000', cursus_korte_naam: 'Synthetic Course', id_cursus: 'synthetic-course',
   toets: 'EX', toets_omschrijving: 'Synthetic exam', resultaat: '7.5', resultaat_omschrijving: 'Synthetic result',
   score: '15', score_omschrijving: 'Synthetic score', weging: 2, toetsdatum: '2026-01-01', mutatiedatum: '2026-01-02', secret: 'private-result-field' });
 const saved = () => ({ version: 1, brightspaceOrigin: 'https://brightspace.tudelft.nl', accountId: '42', providerOrigin: origin,
@@ -40,7 +41,8 @@ function fixture() {
     contact: {}, afterContact: undefined, provider: saved(), fingerprint: 'initial', user: user(),
     rows: { items: [row()], hasMore: false, offset: 0, limit: 25, count: 1 }, calls: [], saved: [], cleared: 0, browserClosed: 0,
     launchOptions: undefined, contextOptions: undefined, tokenExposed: true, routeHandler: undefined, afterIdentity: undefined, afterGrades: undefined,
-    beforeSave: undefined, providerStatus: 200, brightspace: brightspaceSession(), afterSession: undefined, afterLaunch: undefined, navigationUrls: [] };
+    beforeSave: undefined, providerStatus: 200, brightspace: brightspaceSession(), afterSession: undefined, afterLaunch: undefined, navigationUrls: [],
+    sharedCookies: undefined, ssoSaved: [], launchCount: 0, passwordRequired: false };
   const client = { config: { baseUrl: 'https://brightspace.tudelft.nl' },
     sessionIdentity: async () => state.accountId,
     json: async (_product: string, path: string) => {
@@ -48,6 +50,8 @@ function fixture() {
       assert.equal(path, 'users/42'); if (state.ownUserDenied) throw new BrightspaceError('PERMISSION_DENIED', 'Synthetic denied own-user profile.'); return { UserId: 42, OrgDefinedId: state.studentNumber };
     } } as unknown as BrightspaceClient;
   const auth = { config: { baseUrl: 'https://brightspace.tudelft.nl', dataDir: 'unused-mytu-test-vault', timeoutMs: 1000 },
+    sso: async (accountId: string) => ({ accountId, cookies: state.sharedCookies ?? ssoCookies(state.brightspace.storage.cookies),
+      save: async (cookies: unknown, preCommit: () => void) => { preCommit(); state.ssoSaved.push(cookies); } }),
     session: async () => { const snapshot = structuredClone(state.brightspace); await state.afterSession?.(); return snapshot; } } as unknown as Auth;
   const reader = new MyTuDelft(auth, client);
   mock.method(Vault.prototype, 'fingerprint', async () => state.fingerprint);
@@ -63,15 +67,17 @@ function fixture() {
     if (state.fetchFailure) throw Error('private-network-detail');
     if (state.providerStatus !== 200) return new Response('private-error-body', { status: state.providerStatus, headers: { location: 'https://evil.example/private-ticket' } });
     if (url.pathname.endsWith('/gebruiker')) { state.afterIdentity?.(); return Response.json(state.user); }
+    if (state.featureStatus) return new Response('', { status: state.featureStatus });
     if (url.pathname.endsWith('/student/contactgegevens')) { state.afterContact?.(); return Response.json(state.contact); }
     state.afterGrades?.();
-    return Response.json(url.pathname.endsWith('/synthetic-result-1') ? row() : state.rows);
+    return Response.json(url.pathname.endsWith('/scto:901') ? row() : state.rows);
   });
   const page = { isClosed: () => state.browserClosed > 0,
+    locator: () => ({ first: () => ({ isVisible: async () => state.passwordRequired }) }),
     goto: async (url: string) => {
       state.navigationUrls.push(url);
       if (!state.tokenExposed) return;
-      const bytes = Buffer.from(JSON.stringify({ access_token: 'private-mytu-token', expires_in: 3600, token_type: 'bearer' }));
+      const bytes = Buffer.from(JSON.stringify(state.tokenResponse ?? { access_token: 'private-mytu-token', expires_in: 3600, token_type: 'bearer' }));
       const response = { status: () => 200, headers: () => ({ 'content-type': 'application/json' }), body: async () => bytes, dispose: async () => undefined };
       const route = { request: () => ({ url: () => api + '/token', method: () => 'POST', resourceType: () => 'fetch',
         postData: () => JSON.stringify({ code: 'private-authorization-code', redirect_uri: '' }), isNavigationRequest: () => false }),
@@ -80,9 +86,15 @@ function fixture() {
     },
     waitForTimeout: async () => immediate() };
   const context = { route: async (_pattern: string, callback: any) => { state.routeHandler = callback; },
-    routeWebSocket: async () => undefined, newPage: async () => page };
+    request: { post: async (url: string, options: unknown) => {
+      state.refreshCalls ??= []; state.refreshCalls.push({ url, options });
+      return { status: () => state.refreshStatus ?? 200, headers: () => ({ 'content-type': 'application/json' }),
+        body: async () => Buffer.from(JSON.stringify({ access_token: 'private-mytu-token', token_type: 'bearer' })), dispose: async () => undefined };
+    } },
+    routeWebSocket: async () => undefined, newPage: async () => page,
+    storageState: async () => ({ cookies: state.rotatedCookies ?? state.contextOptions.storageState.cookies, origins: [] }) };
   mock.method(chromium, 'launch', async (options: any) => {
-    state.launchOptions = options;
+    state.launchOptions = options; state.launchCount++;
     await state.afterLaunch?.();
     return { newContext: async (options: any) => { state.contextOptions = options; return context; },
       close: async () => { state.browserClosed++; } } as any;
@@ -105,9 +117,9 @@ test('institutional student number matches exactly and display names provide no 
 });
 
 test('official grade normalization returns only observed allowlisted fields and exact identifiers', () => {
-  const result = officialGrade(row(), 'synthetic-result-1');
+  const result = officialGrade(row(), 'scto:901');
   assert.equal(result.result, '7.5'); assert.equal(result.courseCode, 'EXAMPLE1000');
-  assert.equal(result.sourceUrl, origin + '/resultaten/synthetic-result-1'); assert.equal(JSON.stringify(result).includes('private-'), false);
+  assert.equal(result.sourceUrl, origin + '/resultaten/scto%3A901'); assert.equal(JSON.stringify(result).includes('private-'), false);
   assert.throws(() => officialGrade(row(), 'different-result'), { code: 'MYTU_FORMAT_CHANGED' });
   assert.throws(() => officialGrade({ ...row(), id_resultaat: '../gebruiker' }), { code: 'MYTU_FORMAT_CHANGED' });
   assert.ok(String(officialGrade({ ...row(), cursus_korte_naam: 'x'.repeat(50000) }).courseName).length <= 1000);
@@ -126,14 +138,15 @@ test('official grade read verifies both identities and uses only exact same-orig
   const { reader, state } = fixture();
   const auth = await reader.checkAuth(); assert.equal(auth.connected, true); assert.equal(auth.accountVerified, true);
   const results = await reader.grades(); assert.equal(results.accountVerified, true); assert.equal((results.items as any[]).length, 1);
-  const detail = await reader.grade('synthetic-result-1'); assert.equal((detail.item as any).id, 'synthetic-result-1');
+  const detail = await reader.grade('scto:901'); assert.equal((detail.item as any).id, 'scto:901');
   assert.ok(state.calls.some((call: any) => call.url.pathname.endsWith('/student/resultaten') && call.url.search === '?offset=0&limit=25'));
   assert.ok(state.calls.every((call: any) => call.init.headers.authorization === 'Bearer private-mytu-token'));
   assert.equal(JSON.stringify([auth, results, detail]).includes('private-'), false);
 });
 
-test('missing, expired, wrong-origin or wrong-account sessions prevent provider requests', async () => {
+test('missing, expired without SSO, wrong-origin or wrong-account sessions prevent provider requests', async () => {
   const { reader, state } = fixture();
+  state.sharedCookies = [];
   for (const value of [null, { ...saved(), expiresAt: 0 }, { ...saved(), providerOrigin: 'https://evil.example' }, { ...saved(), accountId: '99' }]) {
     state.provider = value; await assert.rejects(reader.grades(), { code: 'MYTU_AUTH_REQUIRED' });
   }
@@ -151,6 +164,7 @@ test('provider identity mismatch and session replacement stop results before the
 
 test('provider redirects and HTTP failures are sanitized and never followed or retried', async () => {
   const { reader, state } = fixture();
+  state.sharedCookies = [];
   for (const [status, code] of [[302, 'MYTU_AUTH_REQUIRED'], [401, 'MYTU_AUTH_REQUIRED'], [403, 'MYTU_PERMISSION_DENIED'], [404, 'MYTU_NOT_FOUND'], [500, 'MYTU_UNAVAILABLE']] as const) {
     state.providerStatus = status; state.calls = [];
     await assert.rejects(reader.grades(), (error: any) => error.code === code && !JSON.stringify(error).includes('private-'));
@@ -158,6 +172,20 @@ test('provider redirects and HTTP failures are sanitized and never followed or r
   }
   state.fetchFailure = true;
   await assert.rejects(reader.grades(), (error: any) => error.code === 'MYTU_UNAVAILABLE' && !error.message.includes('private-'));
+});
+
+test('feature denial with a still-valid identity does not falsely request a new login', async () => {
+  const { reader, state } = fixture(); state.featureStatus = 401;
+  await assert.rejects(reader.withAccess(access => access.request('/student/inschrijvingen/specialisaties')),
+    { code: 'MYTU_PERMISSION_DENIED' });
+  assert.equal(state.calls.filter((call: any) => call.url.pathname.endsWith('/specialisaties')).length, 1);
+  assert.equal((await reader.checkAuth()).connected, true);
+});
+
+test('unimplemented university features are reported separately from transient service errors', async () => {
+  const { reader, state } = fixture(); state.featureStatus = 501;
+  await assert.rejects(reader.withAccess(access => access.request('/student/rooster')), { code: 'MYTU_FEATURE_UNAVAILABLE' });
+  assert.equal(state.calls.filter((call: any) => call.url.pathname.endsWith('/rooster')).length, 1);
 });
 
 test('invalid range and identifiers fail before account or provider access', async () => {
@@ -208,6 +236,22 @@ test('redirect interception blocks foreign destinations and POST replays with sa
   const foreign = await guarded('POST', '', 200, 'https://evil.example/private'); assert.equal(foreign.fetched, 0);
 });
 
+test('OSIRIS root code fragment callback completes without permitting callback substitutions', async () => {
+  const source = oauth + '/oauth/authorize?response_type=code&client_id=synthetic&redirect_uri=' + encodeURIComponent(origin + '/');
+  const callback = origin + '/#code=synthetic-code';
+  const valid = await guarded('GET', callback, 302, source);
+  assert.equal(valid.aborted, 0); assert.equal(valid.fulfilled.status, 200);
+  assert.equal(valid.fulfilled.headers['referrer-policy'], 'no-referrer');
+  assert.equal((await guarded('GET', origin + '/#?code=synthetic-code', 302, source)).aborted, 0);
+  assert.equal((await guarded('GET', callback, 302, oauth + '/samlagent/endpoint/acs.do?SAMLart=synthetic')).aborted, 0);
+  for (const target of [origin + '/#code=', origin + '/#code=a&code=b', origin + '/#code=a&redirect_uri=https://evil.example',
+    origin + '/#access_token=private-token', origin + '/other#code=a', origin + '/?redirect=x#code=a', 'https://evil.example/#code=a']) {
+    const rejected = await guarded('GET', target, 302, source);
+    assert.equal(rejected.aborted, 1); assert.equal(rejected.fulfilled, undefined);
+  }
+  assert.equal((await guarded('GET', callback, 302, saml + '/osirissaml/continue')).aborted, 1);
+});
+
 test('login reuses only scoped unexpired secure SSO cookies and saves only verified provider credentials', async () => {
   const { reader, state } = fixture(); state.provider = null;
   assert.equal((await reader.beginLogin()).state, 'waiting'); await finished(reader);
@@ -217,6 +261,127 @@ test('login reuses only scoped unexpired secure SSO cookies and saves only verif
   assert.equal(state.saved[0].accountId, '42'); assert.equal(state.saved[0].studentHash, hash('1234567'));
   assert.equal(state.saved[0].accessToken, 'private-mytu-token'); assert.equal('storage' in state.saved[0], false);
   assert.equal(JSON.stringify(reader.status()).includes('private-'), false); assert.ok(state.browserClosed > 0); await reader.close();
+});
+
+test('an omitted OSIRIS expiry retains a live-valid token after thirty minutes', async () => {
+  const { reader, state } = fixture();
+  state.tokenResponse = { access_token: 'private-mytu-token', token_type: 'bearer', scope: 'synthetic' };
+  await reader.beginLogin(); await finished(reader);
+  assert.equal(reader.status().state, 'connected');
+  assert.equal(state.saved[0].expiresAt, null);
+  state.provider.savedAt = new Date(Date.now() - 24 * 3600_000).toISOString();
+  assert.equal((await reader.checkAuth()).accountVerified, true);
+  await reader.close();
+});
+
+test('an expired token silently reconnects once for concurrent reads and publishes rotated SSO', async () => {
+  const { reader, state } = fixture(); state.provider.expiresAt = 1;
+  state.sharedCookies = [cookie('login.tudelft.nl', { value: 'private-new-shared-sso' })];
+  state.rotatedCookies = [cookie('login.tudelft.nl', { value: 'private-rotated-sso' })];
+  const results = await Promise.all([reader.checkAuth(), reader.checkAuth(), reader.checkAuth()]);
+  assert.ok(results.every(result => result.connected)); assert.equal(state.launchCount, 1);
+  assert.equal(state.launchOptions.headless, true);
+  assert.deepEqual(state.contextOptions.storageState.cookies, state.sharedCookies);
+  assert.deepEqual(state.ssoSaved, [state.rotatedCookies]);
+  await reader.close();
+});
+
+test('a live identity rejection reconnects through SSO before reading grades', async () => {
+  const { reader, state } = fixture(); state.provider.expiresAt = null; state.providerStatus = 401;
+  state.afterLaunch = () => { state.providerStatus = 200; };
+  assert.equal((await reader.grades()).accountVerified, true);
+  assert.equal(state.launchOptions.headless, true); assert.equal(state.launchCount, 1);
+  assert.equal(state.calls.filter((call: any) => call.url.pathname.endsWith('/resultaten')).length, 1);
+  await reader.close();
+});
+
+test('OSIRIS cookie renewal succeeds without navigation or shared SSO and retains rotated service cookies', async () => {
+  const { reader, state } = fixture(); state.provider.expiresAt = 1; state.sharedCookies = [];
+  state.provider.providerCookies = [cookie('my.tudelft.nl', { name: 'sessionCookie', httpOnly: false })];
+  state.rotatedCookies = [cookie('my.tudelft.nl', { value: 'private-rotated-service-cookie' }), cookie('evil.example')];
+  assert.equal((await reader.checkAuth()).connected, true);
+  assert.equal(state.launchOptions.headless, true); assert.deepEqual(state.navigationUrls, []);
+  assert.deepEqual(state.refreshCalls, [{ url: api + '/token', options: { data: {}, headers: { accept: 'application/json' }, maxRedirects: 0, maxRetries: 0, timeout: 1000 } }]);
+  assert.equal(state.saved[0].expiresAt, null);
+  assert.deepEqual(state.saved[0].providerCookies, state.rotatedCookies.slice(0, 1));
+  await reader.close();
+});
+
+test('a rejected OSIRIS cookie renews through normal SSO without replaying the refresh POST', async () => {
+  const { reader, state } = fixture(); state.provider.expiresAt = 1;
+  state.provider.providerCookies = [cookie('my.tudelft.nl', { name: 'sessionCookie', httpOnly: false })]; state.refreshStatus = 401;
+  assert.equal((await reader.checkAuth()).connected, true);
+  assert.equal(state.refreshCalls.length, 1); assert.deepEqual(state.navigationUrls, [origin + '/']);
+  await reader.close();
+});
+
+test('OSIRIS affinity cookies alone do not trigger the optional cookie renewal protocol', async () => {
+  const { reader, state } = fixture(); state.provider.expiresAt = 1;
+  state.provider.providerCookies = [cookie('my.tudelft.nl', { name: 'INGRESSCOOKIE' })];
+  assert.equal((await reader.checkAuth()).connected, true);
+  assert.equal(state.refreshCalls, undefined); assert.deepEqual(state.navigationUrls, [origin + '/']);
+  await reader.close();
+});
+
+test('the web renewal protocol accepts only the observed empty object or authorization-code exchange', () => {
+  assert.equal(myTuRequestAllowed(new URL(api + '/token'), 'POST', 'fetch', '{}'), true);
+  for (const body of ['[]', 'null', 'true', '"token"', '{"refresh_token":"synthetic-native-token"}', '{"account":"someone"}']) {
+    assert.equal(myTuRequestAllowed(new URL(api + '/token'), 'POST', 'fetch', body), false);
+  }
+});
+
+test('required interaction stops silent renewal and suppresses repeated attempts', async () => {
+  const { reader, state } = fixture(); state.provider.expiresAt = 1; state.tokenExposed = false; state.passwordRequired = true;
+  await assert.rejects(reader.checkAuth(), { code: 'MYTU_AUTH_REQUIRED' });
+  await assert.rejects(reader.checkAuth(), { code: 'MYTU_AUTH_REQUIRED' });
+  assert.equal(state.launchCount, 1); assert.equal(state.launchOptions.headless, true);
+  assert.equal(state.saved.length, 0); assert.equal(state.ssoSaved.length, 0);
+  await reader.close();
+});
+
+test('silent renewal never persists a different account or runs after explicit logout', async () => {
+  const { reader, state } = fixture(); state.provider.expiresAt = 1; state.user.studentnummer = 7654321;
+  await assert.rejects(reader.checkAuth(), { code: 'MYTU_ACCOUNT_MISMATCH' });
+  assert.equal(state.saved.length, 0); assert.equal(state.ssoSaved.length, 0);
+  await reader.logout();
+  await assert.rejects(reader.checkAuth(), { code: 'MYTU_AUTH_REQUIRED' });
+  assert.equal(state.launchCount, 1);
+});
+
+test('explicit student-confirmed linking supports email aliases without bypassing account changes', async () => {
+  const { reader, state } = fixture(); state.studentNumber = undefined; state.uniqueName = 'synthetic-netid@tudelft.nl';
+  state.user.e_mailadres = 'different.alias@student.tudelft.nl';
+  await reader.beginLogin({ confirmedStudentNumber: '1234567' }); await finished(reader);
+  assert.equal(reader.status().identityMethod, 'student_confirmed_link');
+  assert.equal((await reader.checkAuth()).accountVerified, true);
+  state.user.studentnummer = 7654321;
+  await assert.rejects(reader.grades(), { code: 'MYTU_ACCOUNT_MISMATCH' });
+  await reader.close();
+});
+
+test('explicit linking cannot override a conflicting institutional student number', async () => {
+  const { reader, state } = fixture(); state.user.studentnummer = 7654321;
+  await reader.beginLogin({ confirmedStudentNumber: '7654321' }); await finished(reader);
+  assert.equal(reader.status().state, 'failed'); assert.equal(state.saved.length, 0);
+  await reader.close();
+});
+
+test('reconnecting retains a previously confirmed account link after token expiry', async () => {
+  const { reader, state } = fixture(); state.studentNumber = undefined;
+  state.provider.identityMethod = 'student_confirmed_link'; state.provider.expiresAt = 1;
+  await reader.beginLogin(); await finished(reader);
+  assert.equal(reader.status().state, 'connected');
+  assert.equal(reader.status().identityMethod, 'student_confirmed_link');
+  assert.equal((await reader.checkAuth()).accountVerified, true);
+  await reader.close();
+});
+
+test('reconnection cannot inherit a confirmed link from a different account', async () => {
+  const { reader, state } = fixture(); state.studentNumber = undefined;
+  state.provider.identityMethod = 'student_confirmed_link'; state.provider.accountId = 'different-account';
+  await reader.beginLogin(); await finished(reader);
+  assert.equal(reader.status().state, 'failed'); assert.equal(state.saved.length, 0);
+  await reader.close();
 });
 
 test('missing or expired SSO cookies still allow normal service-initiated sign-in', async () => {

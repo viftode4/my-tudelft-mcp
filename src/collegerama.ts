@@ -332,7 +332,8 @@ export class Collegerama {
     const saved = await this.auth.session();
     if (saved.identity?.id !== accountId) throw new BrightspaceError('ACCOUNT_CHANGED', 'The saved Brightspace account changed before recording login.');
     // Reuse only the normal TU/SURF SSO cookies; never transfer Brightspace bearer/cookies/storage.
-    const cookies = saved.storage.cookies.filter(cookie => ['.surfconext.nl', 'engine.surfconext.nl', 'login.tudelft.nl'].includes(cookie.domain));
+    const shared = await this.auth.sso(accountId), cookies = shared.cookies;
+    await this.unchanged(accountId, generation);
     let browser: Browser | undefined;
     try {
       browser = await chromium.launch({ headless: false, channel: this.auth.config.browserChannel }); this.browser = browser;
@@ -364,6 +365,11 @@ export class Collegerama {
             await vault.save({ version: 1, brightspaceOrigin: this.auth.config.baseUrl, accountId, providerOrigin: PORTAL, authority: CONNECT,
               accessToken: token, expiresAt, subjectHash: digest(subject), identityMethod: method, savedAt: new Date().toISOString() }, expected);
             await this.unchanged(accountId, generation);
+            const storage = await context.storageState();
+            await this.unchanged(accountId, generation);
+            await shared.save(storage.cookies, () => {
+              if (generation !== this.generation || page.isClosed()) throw new BrightspaceError('RECORDING_LOGIN_CANCELLED', 'The recording login was cancelled before saving shared sign-in.');
+            });
             this.loginState = { state: 'connected', message: 'Collegerama is connected to the verified Brightspace account.', courseId: target.courseId, topicId: target.topicId };
             return;
           }

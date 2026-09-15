@@ -10,15 +10,38 @@ const config: Config = { baseUrl: 'https://school.example', catalogUrl: 'https:/
 const response = (status: number, data: unknown = {}, headers: Record<string, string> = { 'content-type': 'application/json' }) => ({
   status: () => status, ok: () => status >= 200 && status < 300, headers: () => headers, json: async () => data, text: async () => typeof data === 'string' ? data : JSON.stringify(data), dispose: async () => {},
 });
-function fixture(get: (url: string, options: any) => Promise<unknown>, post: (url: string, options: any) => Promise<unknown> = async () => response(400)) {
-  let session: Session = { origin: config.baseUrl, savedAt: 'initial', bearer: 'test-old-bearer', csrf: 'test-csrf', storage: { cookies: [], origins: [] } };
+function fixture(get: (url: string, options: any) => Promise<unknown>, post: (url: string, options: any) => Promise<unknown> = async () => response(400), activeConfig: Config = config) {
+  let session: Session = { origin: activeConfig.baseUrl, savedAt: 'initial', bearer: 'test-old-bearer', csrf: 'test-csrf', storage: { cookies: [], origins: [] } };
   const context = { get, post, storageState: async () => session.storage, dispose: async () => {} };
   mock.method(request, 'newContext', async () => context as unknown as APIRequestContext);
   mock.method(globalThis, 'fetch', async () => Response.json([{ ProductCode: 'lp', LatestVersion: '1.63' }, { ProductCode: 'le', LatestVersion: '1.97' }]));
   const auth = { session: async () => structuredClone(session), vault: { fingerprint: async () => session.savedAt + ':' + (session.identity?.id ?? ''), save: async (state: Session, expected?: string | null) => { if (expected !== undefined && expected !== session.savedAt + ':' + (session.identity?.id ?? '')) throw new BrightspaceError('ACCOUNT_CHANGED', 'Saved session changed.'); session = structuredClone(state); } } } as unknown as Auth;
-  return { client: new BrightspaceClient(config, auth), auth, session: () => session };
+  auth.renewSso = async () => false;
+  return { client: new BrightspaceClient(activeConfig, auth), auth, session: () => session };
 }
 afterEach(() => mock.restoreAll());
+
+test('expired TU Delft API and browser tokens fall back to shared SSO once for concurrent reads', async () => {
+  let connected = false, renewals = 0;
+  const { client, auth, session } = fixture(async () => connected ? response(200, { verified: true }) : response(401),
+    async () => response(401), { ...config, baseUrl: 'https://brightspace.tudelft.nl' });
+  session().identity = { id: '42', name: 'Synthetic Student' };
+  mock.method(auth, 'renewSso', async (accountId: string) => {
+    assert.equal(accountId, '42'); renewals++; connected = true; session().bearer = 'synthetic-renewed'; session().savedAt = 'renewed'; return true;
+  });
+  try {
+    const values = await Promise.all([client.json('lp', 'users/whoami'), client.json('lp', 'users/whoami')]);
+    assert.deepEqual(values, [{ verified: true }, { verified: true }]); assert.equal(renewals, 1);
+  } finally { await client.close(); }
+});
+
+test('a different account returned by SSO cannot satisfy the original Brightspace read', async () => {
+  const { client, auth, session } = fixture(async () => response(401), async () => response(401), { ...config, baseUrl: 'https://brightspace.tudelft.nl' });
+  session().identity = { id: '42', name: 'Synthetic Student' };
+  mock.method(auth, 'renewSso', async () => { session().identity!.id = '99'; return true; });
+  try { await assert.rejects(client.json('lp', 'users/whoami'), { code: 'ACCOUNT_CHANGED' }); }
+  finally { await client.close(); }
+});
 
 test('follows bookmark pagination and reports a real continuation when bounded', async () => {
   const requested: string[] = [];

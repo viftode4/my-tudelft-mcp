@@ -25,7 +25,9 @@ async function call(name, args = {}) {
 try {
   await client.connect(transport);
   assert.equal((await call('check_auth')).connected, true);
-  const start = await call('begin_mytu_login');
+  const confirmedStudentNumber = process.argv.find(value => value.startsWith('--confirmed-student-number='))?.split('=')[1];
+  if (confirmedStudentNumber !== undefined) assert.match(confirmedStudentNumber, /^[0-9]{1,18}$/);
+  const start = await call('begin_mytu_login', confirmedStudentNumber ? { confirmedStudentNumber } : {});
   report({ tool: 'begin_mytu_login', ...start, checkedAt: new Date().toISOString() });
   const deadline = Date.now() + 12 * 60_000;
   let previous = JSON.stringify(start), connected = false;

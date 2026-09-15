@@ -40,6 +40,10 @@ function fixture() {
     },
   } as unknown as BrightspaceClient;
   const auth = { config: { baseUrl: origin, dataDir: 'not-used-by-mocked-vault', timeoutMs: 1000, maxFileBytes: 1000 },
+    sso: async (accountId: string) => ({ accountId, cookies: [
+      { domain: '.surfconext.nl', name: 'sso', value: 'private-sso' },
+      { domain: 'login.tudelft.nl', name: 'idp', value: 'private-idp' },
+    ], save: async (_cookies: unknown, preCommit: () => void) => { preCommit(); } }),
     session: async () => ({ origin, identity: { id: state.accountId, name: 'Do not copy this' }, bearer: 'private-brightspace-bearer',
       storage: { origins: [{ origin, localStorage: [{ name: 'private', value: 'private-storage' }] }], cookies: [
         { domain: 'brightspace.tudelft.nl', name: 'd2lSessionVal', value: 'private-brightspace-cookie' },
@@ -69,6 +73,7 @@ function fixture() {
   mock.method(chromium, 'launch', async (options: Row) => { state.launchOptions = options; return {
     close: async () => { state.browserClosed++; }, newContext: async (options: Row) => { state.storageSeed = options.storageState as Row; return {
       routeWebSocket: async () => undefined, route: async (_pattern: string, handler: unknown) => { state.routes.push(handler); }, newPage: async () => page,
+      storageState: async () => ({ cookies: [], origins: [] }),
     }; },
   } as unknown as Browser; });
   return { state, client, auth, reader: new Collegerama(auth, client) };

@@ -13,3 +13,4 @@ playwright/.auth/
 *.log
 output/
 coverage/
+.playwright-cli/

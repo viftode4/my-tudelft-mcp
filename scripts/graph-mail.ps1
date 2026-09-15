@@ -69,45 +69,10 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Collections.Generic;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 namespace UniversityMail {
-  public static class LoginConsole {
-    private static bool owned;
-    [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
-    [DllImport("kernel32.dll", SetLastError=true)] private static extern bool AllocConsole();
-    [DllImport("kernel32.dll", SetLastError=true)] private static extern bool FreeConsole();
-    [DllImport("kernel32.dll", SetLastError=true)] private static extern IntPtr GetStdHandle(int kind);
-    [DllImport("kernel32.dll", SetLastError=true)] private static extern bool SetStdHandle(int kind, IntPtr value);
-    [DllImport("kernel32.dll", SetLastError=true)] private static extern uint GetFileType(IntPtr handle);
-    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr handle, int command);
-    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr handle, uint flags);
-    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr handle);
-    public static bool IsReady { get { return RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && GetAncestor(GetConsoleWindow(), 3) != IntPtr.Zero; } }
-    public static bool IsOwnedConsoleHidden { get { return owned && !IsWindowVisible(GetConsoleWindow()); } }
-    public static void Ensure() {
-      if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || IsReady) return;
-      // The SDK itself obtains WAM's parent via GetConsoleWindow/GetAncestor.
-      // A hidden piped child lacks that console. Preserve the private RPC pipes
-      // when allocating our own hidden console; never attach another process.
-      var input = GetStdHandle(-10); var output = GetStdHandle(-11); var error = GetStdHandle(-12);
-      // CREATE_NO_WINDOW may still attach this child to a windowless console.
-      // Detach only this dedicated, fully piped process, never a visible host.
-      if (GetConsoleWindow() != IntPtr.Zero || GetFileType(input) != 3 || GetFileType(output) != 3 || GetFileType(error) != 3) throw new InvalidOperationException("MAIL_LOGIN_HOST_UNAVAILABLE");
-      bool restored = true;
-      try {
-        if (!FreeConsole()) throw new InvalidOperationException("MAIL_LOGIN_HOST_UNAVAILABLE");
-        if (!AllocConsole()) throw new InvalidOperationException("MAIL_LOGIN_HOST_UNAVAILABLE");
-        owned = true; ShowWindow(GetConsoleWindow(), 0);
-      } finally {
-        restored = SetStdHandle(-10, input) & SetStdHandle(-11, output) & SetStdHandle(-12, error);
-      }
-      if (!restored || !IsReady || !IsOwnedConsoleHidden) throw new InvalidOperationException("MAIL_LOGIN_HOST_UNAVAILABLE");
-    }
-    public static void Close() { if (owned) { FreeConsole(); owned = false; } }
-  }
   public sealed class SdkHandler : DelegatingHandler {
     private readonly object provider;
     private readonly MethodInfo tokenMethod;
@@ -163,9 +128,16 @@ function Set-MailSdkTransport {
     if ($session.GraphHttpClient) { $session.GraphHttpClient.Dispose() }
     $session.GraphHttpClient = $client
 }
-function Initialize-MailLoginHost {
-    Add-MailHandlerType
-    [UniversityMail.LoginConsole]::Ensure()
+function Publish-MailLoginPrompt($Value) {
+    # Forward only the SDK's user-facing code and a fixed Microsoft URL.
+    # Never forward raw SDK output, device tokens, or access/refresh tokens.
+    if ($Value -is [System.Management.Automation.WarningRecord]) { $Value = $Value.Message }
+    if ($Value -isnot [string] -or $Value.Length -gt 1024) { return }
+    if ($Value -cmatch '^To sign in, use a web browser to open the page https://(?:microsoft\.com/devicelogin|login\.microsoft\.com/device) and enter the code ([A-Z0-9]{6,12}) to authenticate\.?$') {
+        $event = @{ id = $script:LoginRequestId; event = 'login_prompt'; prompt = @{ verificationUrl = 'https://microsoft.com/devicelogin'; userCode = $Matches[1] } }
+        [Console]::Out.WriteLine('GRAPH_MAIL_V1 ' + (ConvertTo-Json $event -Compress -Depth 4))
+        [Console]::Out.Flush()
+    }
 }
 
 function New-GraphUrl([string] $Path, [System.Collections.IDictionary] $Query = @{}) {
@@ -325,11 +297,13 @@ function Invoke-MailCommand([string] $Operation, $Arguments) {
     if ($Operation -eq 'login') {
         if ($script:Binding) { Stop-Mail 'MAIL_ACCOUNT_CHANGED' }
         Initialize-MailSdk
-        Initialize-MailLoginHost
         $script:ExpectedStudent = $Arguments.student
-        # Ordinary SDK default application. No client ID, secret, device code or
-        # imported bearer token is supplied. The user handles any consent/MFA.
-        try { Connect-MgGraph -Scopes 'User.Read','Mail.ReadWrite' -ContextScope Process -NoWelcome -ErrorAction Stop *> $null }
+        # The same official device-code browser flow runs on Windows and macOS.
+        # The SDK owns token polling; only its display code leaves this process.
+        try {
+            Connect-MgGraph -Scopes 'User.Read','Mail.ReadWrite' -ContextScope Process -UseDeviceCode -NoWelcome -ErrorAction Stop 3>&1 4>$null 5>$null 6>$null |
+                ForEach-Object { Publish-MailLoginPrompt $_ }
+        }
         catch { $script:LoginDiagnostic = Get-MailLoginDiagnostic $_.Exception; Stop-Mail 'MAIL_LOGIN_FAILED' }
         Set-MailSdkTransport
         $identity = Get-MailIdentity
@@ -386,6 +360,7 @@ if (!$LibraryOnly) {
                 $request = ConvertFrom-Json -InputObject $line -AsHashtable -Depth 12
                 $requestId = [int]$request.id
                 if ($requestId -le 0) { Stop-Mail 'INVALID_ARGUMENT' }
+                $script:LoginRequestId = $requestId
                 $result = Invoke-MailCommand ([string]$request.op) $request.args
                 $response = @{ id = $requestId; ok = $true; result = $result }
             } catch {
@@ -402,6 +377,5 @@ if (!$LibraryOnly) {
     } finally {
         $script:Drafts.Clear(); $script:Cursors.Clear()
         if (Get-Command Disconnect-MgGraph -ErrorAction SilentlyContinue) { Disconnect-MgGraph -ErrorAction SilentlyContinue *> $null }
-        if ('UniversityMail.LoginConsole' -as [type]) { [UniversityMail.LoginConsole]::Close() }
     }
 }

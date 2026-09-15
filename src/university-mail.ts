@@ -11,11 +11,32 @@ const MAX_PROTOCOL_BYTES = 2 * 1024 * 1024;
 type Client = Pick<BrightspaceClient, 'config' | 'json' | 'sessionIdentity'>;
 export interface MailStudentIdentity { accountId: string; uniqueName: string; emails: string[] }
 export interface MailIdentity { id: string; tenantId: string; userPrincipalName: string; mail: string; displayName: string }
-export interface MailWorker { request(op: string, args?: Row, timeoutMs?: number): Promise<unknown>; close(): Promise<void> }
-export interface UniversityMailOptions { powerShell?: string; modulePath?: string; workerFactory?: () => Promise<MailWorker> }
+export interface MailWorker { request(op: string, args?: Row, timeoutMs?: number): Promise<unknown>; close(): Promise<void>; onLoginPrompt?: (prompt: MailLoginPrompt) => void }
+export interface MailLoginPrompt { verificationUrl: string; userCode: string }
+export interface UniversityMailOptions { powerShell?: string; modulePath?: string; workerFactory?: () => Promise<MailWorker>; openBrowser?: () => void }
 export interface MailLoginStatus {
   state: 'idle' | 'waiting' | 'connected' | 'failed'; message: string;
   account?: MailIdentity; error?: ReturnType<typeof safeError>;
+  verificationUrl?: string; userCode?: string;
+}
+
+export function mailLoginPrompt(value: unknown): MailLoginPrompt | undefined {
+  const row = record(value);
+  if (row.verificationUrl !== 'https://microsoft.com/devicelogin' || !/^[A-Z0-9]{6,12}$/.test(str(row.userCode))) return undefined;
+  return { verificationUrl: row.verificationUrl, userCode: str(row.userCode) };
+}
+
+/** Only a fixed Microsoft page is passed to the platform's browser launcher. */
+export function mailBrowserCommand(platform: string): [string, string[]] {
+  const url = 'https://microsoft.com/devicelogin';
+  if (platform === 'win32') return ['powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "Start-Process '" + url + "'"]];
+  return platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
+}
+function openMailBrowser(): void {
+  const [command, args] = mailBrowserCommand(process.platform);
+  const child = spawn(command, args, { shell: false, windowsHide: true, stdio: 'ignore' });
+  child.on('error', () => undefined); // The status always supplies the manual link.
+  child.unref();
 }
 
 const lower = (value: unknown): string => str(value).trim().toLowerCase();
@@ -61,8 +82,9 @@ export function mailLoginDiagnostic(value: unknown): Row | undefined {
 
 /** A dedicated SDK process owns tokens; only bounded protocol responses leave it. */
 export class PowerShellMailWorker implements MailWorker {
+  onLoginPrompt?: (prompt: MailLoginPrompt) => void;
   private readonly process: ChildProcessWithoutNullStreams;
-  private readonly pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; draft: boolean }>();
+  private readonly pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; draft: boolean; login: boolean }>();
   private sequence = 0;
   private buffer = '';
   private closed = false;
@@ -92,22 +114,33 @@ export class PowerShellMailWorker implements MailWorker {
     for (;;) {
       const end = this.buffer.indexOf('\n'); if (end < 0) break;
       const line = this.buffer.slice(0, end).replace(/\r$/, ''); this.buffer = this.buffer.slice(end + 1);
-      if (!line.startsWith(PREFIX)) continue;
+      if (!line.startsWith(PREFIX)) {
+        // SDK versions that write directly to Console bypass the PS pipeline.
+        const match = /^To sign in, use a web browser to open the page https:\/\/(?:microsoft\.com\/devicelogin|login\.microsoft\.com\/device) and enter the code ([A-Z0-9]{6,12}) to authenticate\.?$/.exec(line);
+        if (match && [...this.pending.values()].some(entry => entry.login)) {
+          this.onLoginPrompt?.({ verificationUrl: 'https://microsoft.com/devicelogin', userCode: match[1]! });
+        }
+        continue;
+      }
       let response: Row; try { response = record(JSON.parse(line.slice(PREFIX.length))); } catch { return this.fail('MAIL_PROTOCOL_ERROR', 'The email worker returned an invalid response.'); }
       const entry = this.pending.get(Number(response.id)); if (!entry) continue;
+      if (response.event === 'login_prompt') {
+        const prompt = mailLoginPrompt(response.prompt);
+        if (entry.login && prompt) this.onLoginPrompt?.(prompt);
+        continue;
+      }
       this.pending.delete(Number(response.id)); clearTimeout(entry.timer);
       if (response.ok === true) entry.resolve(response.result);
       else {
         const code = str(record(response.error).code);
         const allowed: Record<string, string> = {
-          MAIL_AUTH_REQUIRED: 'Sign in to university email first.', MAIL_LOGIN_FAILED: 'Microsoft sign-in did not complete. Check the Microsoft login dialog; university approval or MFA may be required.',
+          MAIL_AUTH_REQUIRED: 'Sign in to university email first.', MAIL_LOGIN_FAILED: 'Microsoft browser sign-in did not complete. Start email login again; university approval or MFA may be required.',
           MAIL_ACCOUNT_MISMATCH: 'The email account does not match the current TU Delft account.', MAIL_SCOPE_MISMATCH: 'The Microsoft SDK session has unsupported permissions. No mailbox action was performed.',
           MAIL_ACCOUNT_CHANGED: 'The email account changed. Sign in again.', MAIL_CURSOR_INVALID: 'The email cursor expired or belongs to another query.', MAIL_NOT_FOUND: 'The selected message or folder was not found in your mailbox.',
           MAIL_REQUEST_FAILED: 'Microsoft Graph could not complete this request.', MAIL_RESPONSE_TOO_LARGE: 'The Microsoft Graph response exceeded its size limit.', MAIL_UNSAFE_RESPONSE: 'Microsoft Graph returned an unexpected response or redirect.',
           MAIL_DRAFT_RESULT_UNKNOWN: 'Draft creation may have completed. Check Outlook Drafts before trying again; the request was not retried.', MAIL_DRAFT_INVALID: 'Reply draft creation requires a sent or received message with a valid recipient.',
           MAIL_DEPENDENCY_MISSING: 'Install the optional mail dependencies with scripts/install-mail.ps1.', INVALID_ARGUMENT: 'An email argument is invalid.',
           MAIL_READ_LIMIT: 'Email pagination reached its 100-page limit. Start a narrower query.',
-          MAIL_LOGIN_HOST_UNAVAILABLE: 'The Microsoft sign-in window could not obtain its Windows parent. The email worker could not start interactive authentication.',
         };
         entry.reject(new BrightspaceError(code in allowed ? code : 'MAIL_REQUEST_FAILED', allowed[code] ?? allowed.MAIL_REQUEST_FAILED!, code === 'MAIL_LOGIN_FAILED' ? mailLoginDiagnostic(record(response.error).details) : undefined));
       }
@@ -118,7 +151,7 @@ export class PowerShellMailWorker implements MailWorker {
     return new Promise((resolve, reject) => {
       const id = ++this.sequence;
       const timer = setTimeout(() => this.fail('MAIL_TIMEOUT', 'The email operation timed out. Sign in again.'), timeoutMs);
-      this.pending.set(id, { resolve, reject, timer, draft: op === 'createReply' });
+      this.pending.set(id, { resolve, reject, timer, draft: op === 'createReply', login: op === 'login' });
       this.process.stdin.write(JSON.stringify({ id, op, args }) + '\n', error => { if (error) this.fail('MAIL_SESSION_ENDED', 'The email worker stopped.'); });
     });
   }
@@ -187,13 +220,19 @@ export class UniversityMail {
     if (this.status.state === 'waiting') return this.loginStatus();
     const generation = ++this.generation, old = this.worker; this.worker = undefined; this.student = undefined; this.account = undefined;
     void old?.close();
-    this.status = { state: 'waiting', message: 'Complete Microsoft sign-in and any consent in the Microsoft login window. Requested access: your profile and mail read/write for unsent drafts; no sending permission. University approval may be required.' };
+    this.status = { state: 'waiting', message: 'Preparing Microsoft browser sign-in. Poll login status for the Microsoft link and short code. Requested access: your profile and mail read/write for unsent drafts; no sending permission. University approval may be required.' };
     void (async () => {
       let worker: MailWorker | undefined;
       try {
         const student = await this.identity(); await this.assertCurrent(generation, student);
         worker = await this.createWorker();
         await this.assertCurrent(generation, student); this.worker = worker;
+        let browserOpened = false;
+        worker.onLoginPrompt = prompt => {
+          if (generation !== this.generation || this.status.state !== 'waiting') return;
+          this.status = { state: 'waiting', message: 'Open the Microsoft link and enter the code, then complete TU Delft sign-in and consent in your browser. If no browser opened, use the link manually.', ...prompt };
+          if (!browserOpened) { browserOpened = true; (this.options.openBrowser ?? openMailBrowser)(); }
+        };
         const result = record(await worker.request('login', { student }, 10 * 60_000));
         const account = matchMailIdentity(student, result.identity);
         await this.assertCurrent(generation, student);

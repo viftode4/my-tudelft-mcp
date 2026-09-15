@@ -20,6 +20,7 @@ import { GroupLockerFiles } from '../src/group-locker-files.js';
 import { Collegerama } from '../src/collegerama.js';
 import { TextSubmissionActions } from '../src/text-submissions.js';
 import { MyTuDelft } from '../src/mytudelft.js';
+import { MyTimetable } from '../src/mytimetable.js';
 import { UniversityMail } from '../src/university-mail.js';
 
 const configFor = (dataDir: string): Config => ({ baseUrl: 'https://school.example', catalogUrl: 'https://catalog.example', dataDir, timeoutMs: 1000, maxFileBytes: 100 });
@@ -47,16 +48,47 @@ async function fixture() {
 }
 afterEach(() => mock.restoreAll());
 
+test('MCP timetable tools validate timestamp schemas and forward only the supplied connection and range', async () => {
+  const f = await fixture(), calls: unknown[][] = [];
+  mock.method(MyTimetable.prototype, 'connect', async (...args: any[]) => { calls.push(args); return { connected: true }; });
+  mock.method(MyTimetable.prototype, 'events', async (...args: any[]) => { calls.push(args); return { items: [], complete: true }; });
+  mock.method(MyTimetable.prototype, 'status', async () => ({ configured: true }));
+  try {
+    const feedUrl = 'https://mytimetable.tudelft.nl/ical?synthetic-private';
+    const from = '2026-10-01T00:00:00+02:00', to = '2026-10-08T00:00:00+02:00';
+    const connected = await f.client.callTool({ name: 'connect_timetable', arguments: { feedUrl } });
+    assert.equal(JSON.stringify(connected).includes('synthetic-private'), false);
+    assert.equal(decode(await f.client.callTool({ name: 'get_timetable_status', arguments: {} })).configured, true);
+    await f.client.callTool({ name: 'get_timetable', arguments: { from, to } });
+    assert.equal((await f.client.callTool({ name: 'get_timetable', arguments: { from: '2026-10-01', to } })).isError, true);
+    assert.deepEqual(calls, [[feedUrl], [from, to]]);
+    const { tools } = await f.client.listTools();
+    assert.equal(tools.find(tool => tool.name === 'get_timetable')!.annotations?.readOnlyHint, true);
+    assert.equal(tools.find(tool => tool.name === 'connect_timetable')!.annotations?.readOnlyHint, false);
+  } finally { await f.close(); }
+});
+
+test('global logout removes the local timetable before clearing the Brightspace session', async () => {
+  const f = await fixture(), calls: string[] = [];
+  mock.method(MyTimetable.prototype, 'disconnect', async () => { calls.push('timetable'); return { disconnected: true }; });
+  mock.method(f.auth, 'logout', async () => { calls.push('brightspace'); });
+  try {
+    await f.client.callTool({ name: 'logout', arguments: {} });
+    assert.deepEqual(calls, ['timetable', 'brightspace']);
+  } finally { await f.close(); }
+});
+
 test('MCP exposes student tools with schemas and accurate write annotations', async () => {
   const f = await fixture();
   try {
     const { tools } = await f.client.listTools();
-    assert.equal(tools.length, 65);
+    assert.equal(tools.length, 78);
     assert.equal(new Set(tools.map((tool) => tool.name)).size, tools.length);
     for (const name of ['list_recordings', 'read_course_service', 'list_available_groups', 'prepare_group_enrollment', 'search_study_guide', 'get_study_guide', 'list_group_locker_files', 'read_group_locker_file']) assert.ok(tools.some((tool) => tool.name === name), name);
     for (const name of ['begin_recording_login', 'get_recording_login_status', 'read_recording']) assert.ok(tools.some((tool) => tool.name === name), name);
+    for (const name of ['connect_timetable', 'get_timetable_status', 'get_timetable', 'disconnect_timetable']) assert.ok(tools.some((tool) => tool.name === name), name);
     for (const name of ['begin_login', 'check_auth', 'list_courses', 'read_material', 'list_assignments', 'search_course_materials', 'search_catalog', 'get_my_grades', 'get_study_overview', 'get_course_tools', 'get_my_groups', 'get_my_progress', 'read_group_locker', 'read_announcement_attachment', 'read_my_submission_file', 'read_assignment_feedback_file']) assert.ok(tools.some((tool) => tool.name === name), name);
-    for (const name of ['confirm_assignment_submission', 'confirm_course_registration', 'confirm_group_enrollment', 'confirm_text_submission']) {
+    for (const name of ['confirm_assignment_submission', 'confirm_course_registration', 'confirm_group_enrollment', 'confirm_text_submission', 'confirm_official_registration']) {
       const tool = tools.find((tool) => tool.name === name)!;
       assert.equal(tool.annotations?.readOnlyHint, false);
       assert.equal(tool.annotations?.idempotentHint, false);
@@ -102,6 +134,10 @@ test('MCP validates IDs, limits and explicit literal confirmation before running
       { name: 'get_course_content', arguments: { courseId: '../other' } },
       { name: 'get_official_grade', arguments: { resultId: '../other' } },
       { name: 'list_official_grades', arguments: { limit: 101 } },
+      { name: 'get_official_programme', arguments: { progressId: '../other' } },
+      { name: 'search_official_courses', arguments: { kind: 'exam', query: 'x' } },
+      { name: 'confirm_official_registration', arguments: { confirmationToken: 'synthetic-preview-token', confirmed: false } },
+      { name: 'confirm_official_registration', arguments: { confirmationToken: 'synthetic-preview-token' } },
       { name: 'list_mail_messages', arguments: { limit: 51 } },
       { name: 'list_mail_messages', arguments: { cursor: 'https://example.com/next' } },
       { name: 'read_mail', arguments: { messageId: '../other' } },

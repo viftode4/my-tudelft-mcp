@@ -6,11 +6,38 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
-import { UniversityMail, PowerShellMailWorker, matchMailIdentity, mailLoginDiagnostic, type MailWorker } from '../src/university-mail.js';
+import { UniversityMail, PowerShellMailWorker, matchMailIdentity, mailLoginDiagnostic, mailLoginPrompt, mailBrowserCommand, type MailWorker } from '../src/university-mail.js';
 import { BrightspaceError, safeError } from '../src/errors.js';
 
 const account = { id: '11111111-1111-1111-1111-111111111111', tenantId: '22222222-2222-2222-2222-222222222222', userPrincipalName: 'teststudent@tudelft.nl', mail: 't.student@student.tudelft.nl', displayName: 'Test Student' };
 const student = { accountId: '123', uniqueName: 'teststudent', emails: ['t.student@student.tudelft.nl'] };
+
+test('browser prompt rejects arbitrary URLs and commands on every platform', () => {
+  assert.equal(mailLoginPrompt({ verificationUrl: 'https://evil.example', userCode: 'ABC123XYZ' }), undefined);
+  assert.equal(mailLoginPrompt({ verificationUrl: 'https://microsoft.com/devicelogin', userCode: 'x;calc' }), undefined);
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    const [command, args] = mailBrowserCommand(platform);
+    assert.equal(command, { win32: 'powershell.exe', darwin: 'open', linux: 'xdg-open' }[platform]);
+    assert.ok(args.join(' ').includes('https://microsoft.com/devicelogin'));
+  }
+});
+
+test('login prompt opens once, is exposed while waiting and cleared on logout; stale events are ignored', async () => {
+  let opened = 0;
+  const worker: MailWorker = { request: async () => new Promise(() => {}), close: async () => {} };
+  const client: any = { config: {}, sessionIdentity: async () => '123', json: async () => ({ Identifier: '123', UniqueName: student.uniqueName }) };
+  const mail = new UniversityMail(client, { workerFactory: async () => worker, openBrowser: () => { opened++; } });
+  mail.beginLogin();
+  await new Promise(resolve => setImmediate(resolve));
+  const prompt = { verificationUrl: 'https://microsoft.com/devicelogin', userCode: 'ABC123XYZ' };
+  worker.onLoginPrompt!(prompt); worker.onLoginPrompt!(prompt);
+  assert.equal(opened, 1);
+  assert.equal(mail.loginStatus().userCode, prompt.userCode);
+  await mail.logout(); worker.onLoginPrompt!(prompt);
+  assert.equal(mail.loginStatus().state, 'idle');
+  assert.equal(mail.loginStatus().userCode, undefined);
+  assert.equal(opened, 1);
+});
 test('login diagnostics emit only fixed classifications and allowlisted AADSTS references', () => {
   assert.deepEqual(mailLoginDiagnostic({ stage: 'sdk_login', reason: 'window_handle_required', exceptionType: 'Microsoft.Identity.Client.MsalClientException', aadsts: 'AADSTS65001', token: 'secret', message: 'secret' }), { stage: 'sdk_login', reason: 'window_handle_required', exceptionType: 'Microsoft.Identity.Client.MsalClientException', aadsts: 'AADSTS65001' });
   assert.deepEqual(mailLoginDiagnostic({ stage: 'sdk_login', reason: 'secret', exceptionType: 'secret', aadsts: 'AADSTS65001 secret' }), { stage: 'sdk_login', reason: 'unclassified', exceptionType: 'other' });
@@ -180,22 +207,47 @@ test('real hidden PowerShell worker fails closed before login and rejects send c
   } finally { await worker.close(); }
 });
 
-test('Windows login host remains hidden, supplies the SDK parent and preserves private protocol pipes', { skip: !hasPowerShell || process.platform !== 'win32' }, async () => {
+test('worker delivers SDK and structured prompts before login completes and rejects malformed prompts', { skip: !hasPowerShell }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mail-prompt-test-'));
+  const path = join(directory, 'worker.ps1');
+  await writeFile(path, String.raw`
+param($ModulePath)
+$null=[Console]::ReadLine()
+[Console]::Out.WriteLine('GRAPH_MAIL_V1 {"id":1,"event":"login_prompt","prompt":{"verificationUrl":"https://evil.example","userCode":"ABC123XYZ"}}')
+[Console]::Out.WriteLine('To sign in, use a web browser to open the page https://login.microsoft.com/device and enter the code ABC123XYZ to authenticate.')
+[Console]::Out.WriteLine('GRAPH_MAIL_V1 {"id":1,"event":"login_prompt","prompt":{"verificationUrl":"https://microsoft.com/devicelogin","userCode":"DEF456XYZ"}}')
+[Console]::Out.Flush()
+Start-Sleep -Milliseconds 100
+[Console]::Out.WriteLine('GRAPH_MAIL_V1 {"id":1,"ok":true,"result":{"finished":true}}')
+$null=[Console]::ReadLine()
+`);
+  const worker = new PowerShellMailWorker('pwsh', path, 'unused');
+  try {
+    const codes: string[] = [];
+    worker.onLoginPrompt = prompt => { codes.push(prompt.userCode); };
+    assert.deepEqual(await worker.request('login'), { finished: true });
+    assert.deepEqual(codes, ['ABC123XYZ', 'DEF456XYZ']);
+  } finally {
+    await worker.close();
+    assert.equal(resolve(dirname(directory)), resolve(tmpdir()));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('browser login forwards only the official display code and fixed URL', { skip: !hasPowerShell }, async () => {
   const output = await runPowerShell(String.raw`
-Assert ([Console]::ReadLine() -eq 'before') 'Input pipe missing before console allocation'
-Initialize-MailLoginHost
-try {
-  Assert ([UniversityMail.LoginConsole]::IsReady) 'SDK parent handle unavailable'
-  Assert ([UniversityMail.LoginConsole]::IsOwnedConsoleHidden) 'Helper console is visible or not owned'
-  Assert ([Console]::ReadLine() -eq 'after') 'Input pipe lost after console allocation'
-  [Console]::Out.WriteLine('private output survived')
-  [Console]::Error.WriteLine('private error survived')
-  Initialize-MailLoginHost
-  Assert ([UniversityMail.LoginConsole]::IsOwnedConsoleHidden) 'Repeated initialization changed console visibility'
-} finally { [UniversityMail.LoginConsole]::Close() }
-Assert (![UniversityMail.LoginConsole]::IsReady) 'Owned console remained attached'
-`, 'before\nafter\n');
-  assert.match(output, /private output survived/);
+$script:LoginRequestId = 7
+Publish-MailLoginPrompt 'To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABC123XYZ to authenticate.'
+Publish-MailLoginPrompt 'To sign in, use a web browser to open the page https://login.microsoft.com/device and enter the code ABC123XYZ to authenticate.'
+Publish-MailLoginPrompt 'To sign in, use a web browser to open the page https://evil.example and enter the code ABC123XYZ to authenticate.'
+Publish-MailLoginPrompt 'access_token=secret'
+Publish-MailLoginPrompt @{message='secret'}
+`);
+  const lines = output.trim().split(/\r?\n/);
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0], lines[1]);
+  const event = JSON.parse(lines[0]!.replace('GRAPH_MAIL_V1 ', ''));
+  assert.deepEqual(event, { id: 7, event: 'login_prompt', prompt: { verificationUrl: 'https://microsoft.com/devicelogin', userCode: 'ABC123XYZ' } });
 });
 
 test('PowerShell SDK failure classification never returns raw identity or protocol material', { skip: !hasPowerShell }, async () => {
@@ -212,8 +264,7 @@ test('PowerShell login requests only profile/mail draft access and validates ide
   await runPowerShell(String.raw`
 $script:logins=0;$script:reads=0;$script:badScope=$false
 function Initialize-MailSdk {}
-function Initialize-MailLoginHost {}
-function Connect-MgGraph { param($Scopes,$ContextScope,[switch]$NoWelcome,$ErrorAction); Assert (($Scopes -join ',') -eq 'User.Read,Mail.ReadWrite') 'Unexpected requested scopes'; Assert ($ContextScope -eq 'Process') 'Session persisted'; $script:logins++ }
+function Connect-MgGraph { param($Scopes,$ContextScope,[switch]$NoWelcome,[switch]$UseDeviceCode,$ErrorAction); Assert $UseDeviceCode 'Browser device flow missing'; Assert (($Scopes -join ',') -eq 'User.Read,Mail.ReadWrite') 'Unexpected requested scopes'; Assert ($ContextScope -eq 'Process') 'Session persisted'; $script:logins++ }
 function Set-MailSdkTransport {}
 function Get-MgContext { return [pscustomobject]@{AuthType='Delegated';ContextScope='Process';Scopes=$(if($script:badScope){@('User.Read','Mail.ReadWrite','Mail.Send')}else{@('User.Read','Mail.ReadWrite','openid','profile','offline_access')});TenantId='22222222-2222-2222-2222-222222222222';Account='teststudent@tudelft.nl'} }
 function Invoke-GraphJson { param($Method,$Url,$Body); Assert ($Method -eq 'GET' -and $Url.StartsWith('https://graph.microsoft.com/v1.0/me?')) 'Unexpected identity request';$script:reads++;return @{id='11111111-1111-1111-1111-111111111111';userPrincipalName='teststudent@tudelft.nl';mail='t.student@student.tudelft.nl';displayName='Test Student'} }

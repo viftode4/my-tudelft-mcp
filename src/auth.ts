@@ -2,6 +2,7 @@ import { chromium, type APIRequestContext, type Browser, type BrowserContext, ty
 import type { Config } from './config.js';
 import { BrightspaceError } from './errors.js';
 import { Vault } from './vault.js';
+import { SharedSso, isSsoCookie, type SsoLease } from './sso.js';
 
 export type BrowserState = Awaited<ReturnType<BrowserContext['storageState']>>;
 export interface Session {
@@ -12,7 +13,7 @@ export interface Session {
   savedAt: string;
   identity?: { id: string; name: string };
 }
-export interface LoginOptions { fresh?: boolean }
+export interface LoginOptions { fresh?: boolean; silent?: boolean }
 export interface LoginStatus { state: 'idle' | 'waiting' | 'connected' | 'failed'; message: string; }
 
 export function isBrightspaceHome(url: string, origin: string): boolean {
@@ -88,6 +89,8 @@ export class Auth {
   private loginBrowser?: Browser;
   private loginTask?: Promise<void>;
   private cancelLogin = false;
+  private generation = 0;
+  private failedSilentAt = 0;
   status: LoginStatus = { state: 'idle', message: 'Run login to connect your Brightspace account.' };
 
   constructor(readonly config: Config) { this.vault = new Vault(config.dataDir); }
@@ -100,11 +103,17 @@ export class Auth {
     return state;
   }
 
+  async sso(accountId: string): Promise<SsoLease> {
+    const saved = await this.session();
+    if (saved.identity?.id !== accountId) throw new BrightspaceError('ACCOUNT_CHANGED', 'The saved Brightspace account changed before university sign-in.');
+    return new SharedSso(this.config).open(accountId, saved.storage.cookies);
+  }
+
   beginLogin(service: 'brightspace' | 'catalog' = 'brightspace', options: LoginOptions = {}): LoginStatus {
     if (this.loginTask) return this.status;
     this.cancelLogin = false;
-    this.status = { state: 'waiting', message: 'Complete your TU Delft login in the browser window. You have 10 minutes.' };
-    this.loginTask = this.login(service, options.fresh === true).catch((error: unknown) => {
+    this.status = { state: 'waiting', message: options.silent ? 'Reconnecting Brightspace through your shared university sign-in.' : 'Complete your TU Delft login in the browser window. You have 10 minutes.' };
+    this.loginTask = this.login(service, options.fresh === true, options.silent === true).catch((error: unknown) => {
       // Browser exceptions can contain request headers or login URLs. Keep them out of logs.
       this.status = { state: 'failed', message: error instanceof BrightspaceError ? error.message : 'Login could not finish. Check the browser and try again.' };
     }).finally(() => { this.loginTask = undefined; });
@@ -113,23 +122,45 @@ export class Auth {
 
   async waitForLogin(): Promise<LoginStatus> { await this.loginTask; return this.status; }
 
+  async renewSso(accountId: string): Promise<boolean> {
+    if (this.config.baseUrl !== 'https://brightspace.tudelft.nl' || Date.now() - this.failedSilentAt < 60_000) return false;
+    const generation = this.generation;
+    const previous = await this.session();
+    if (generation !== this.generation) throw new BrightspaceError('LOGIN_CANCELLED', 'The Brightspace connection was closed during SSO reconnection.');
+    if (previous.identity?.id !== accountId) throw new BrightspaceError('ACCOUNT_CHANGED', 'The Brightspace account changed before SSO reconnection.');
+    this.beginLogin('brightspace', { silent: true });
+    await this.waitForLogin();
+    if (this.status.state !== 'connected') { this.failedSilentAt = Date.now(); return false; }
+    if ((await this.session()).identity?.id !== accountId) throw new BrightspaceError('ACCOUNT_CHANGED', 'The Brightspace account changed during SSO reconnection.');
+    this.failedSilentAt = 0; return true;
+  }
+
   private assertLoginActive(page?: Page): void {
     if (this.cancelLogin || page?.isClosed()) throw new BrightspaceError('LOGIN_CANCELLED', 'Login was cancelled. The previous saved session was kept.');
   }
 
-  private async login(service: 'brightspace' | 'catalog', fresh: boolean): Promise<void> {
+  private async login(service: 'brightspace' | 'catalog', fresh: boolean, silent: boolean): Promise<void> {
     const expectedFingerprint = await this.vault.fingerprint();
     const previous = await this.vault.load().catch(() => null);
     if (this.cancelLogin) throw new BrightspaceError('LOGIN_CANCELLED', 'Login was cancelled. Run login again when ready.');
     if (service === 'catalog' && (!previous || previous.origin !== this.config.baseUrl)) {
       throw new BrightspaceError('AUTH_REQUIRED', 'Sign in to Brightspace first, then connect the catalog.');
     }
-    const browser = await chromium.launch({ headless: false, channel: this.config.browserChannel });
+    if (silent && (fresh || service !== 'brightspace' || !previous?.identity || previous.origin !== this.config.baseUrl)) {
+      throw new BrightspaceError('AUTH_REQUIRED', 'Connect and verify Brightspace before automatic SSO reconnection.');
+    }
+    const browser = await chromium.launch({ headless: silent, channel: this.config.browserChannel });
     this.loginBrowser = browser;
     try {
       if (this.cancelLogin) throw new BrightspaceError('LOGIN_CANCELLED', 'Login was cancelled. Run login again when ready.');
+      const shared = this.config.baseUrl === 'https://brightspace.tudelft.nl' && previous?.origin === this.config.baseUrl && previous.identity
+        ? await this.sso(previous.identity.id) : undefined;
+      const storageState = !fresh && previous?.origin === this.config.baseUrl ? structuredClone(previous.storage) : undefined;
+      if (storageState && shared) storageState.cookies = [...storageState.cookies.filter(cookie => !isSsoCookie(cookie)), ...shared.cookies];
+      this.assertLoginActive();
+      if (silent && !shared?.cookies.length) throw new BrightspaceError('AUTH_REQUIRED', 'The university SSO session needs sign-in. Run begin_login.');
       const context = await browser.newContext({
-        storageState: !fresh && previous?.origin === this.config.baseUrl ? previous.storage : undefined,
+        storageState,
         locale: 'en-GB', timezoneId: 'Europe/Amsterdam',
       });
       const page = await context.newPage();
@@ -140,8 +171,8 @@ export class Auth {
         const authorization = req.headers().authorization;
         if (authorization?.startsWith('Bearer ')) captured = authorization.slice(7);
       });
-      await page.goto(service === 'catalog' ? this.config.catalogUrl : `${this.config.baseUrl}/d2l/home`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-      const deadline = Date.now() + 10 * 60_000;
+      await page.goto(service === 'catalog' ? this.config.catalogUrl : `${this.config.baseUrl}/d2l/home`, { waitUntil: 'domcontentloaded', timeout: silent ? 25_000 : 60_000 });
+      const deadline = Date.now() + (silent ? 25_000 : 10 * 60_000);
       let connected: 'brightspace' | 'catalog' | undefined;
       while (Date.now() < deadline) {
         if (this.cancelLogin || page.isClosed()) throw new BrightspaceError('LOGIN_CANCELLED', 'The login window was closed. The previous saved session was kept.');
@@ -158,6 +189,9 @@ export class Auth {
           connected = 'brightspace'; break;
         }
         if (service === 'catalog' && await hasCatalogSession(page, this.config)) { connected = 'catalog'; break; }
+        if (silent && await page.locator('input[type="password"]').first().isVisible().catch(() => false)) {
+          throw new BrightspaceError('AUTH_REQUIRED', 'The university requires sign-in or MFA. Run begin_login once to refresh shared SSO.');
+        }
         await page.waitForTimeout(750);
       }
       if (!connected) throw new BrightspaceError('LOGIN_TIMEOUT', 'Login timed out. Run login again when ready.');
@@ -199,16 +233,34 @@ export class Auth {
       } catch { /* Browser session remains useful when an API endpoint is unavailable. */ }
       this.assertLoginActive(page);
       if (fresh && !identity) throw new BrightspaceError('LOGIN_UNVERIFIED', 'The fresh browser login could not verify your Brightspace account. The previous saved session was kept. Retry when the current-user API is available.');
+      if (silent && (!identity || identity.id !== previous?.identity?.id)) {
+        throw new BrightspaceError('ACCOUNT_CHANGED', 'Automatic SSO did not verify the previously connected Brightspace account. The saved session was kept.');
+      }
       const storage = await context.storageState();
       this.assertLoginActive(page);
       await this.vault.save({ origin: this.config.baseUrl, storage, bearer, csrf: material.csrf, savedAt: new Date().toISOString(), identity },
         expectedFingerprint, () => this.assertLoginActive(page));
+      if (identity && this.config.baseUrl === 'https://brightspace.tudelft.nl') {
+        const updated = shared?.accountId === identity.id ? shared : await this.sso(identity.id);
+        await updated.save(storage.cookies, () => this.assertLoginActive(page));
+      }
+      this.failedSilentAt = 0;
       this.status = identity
         ? { state: 'connected', message: service === 'catalog' ? 'The catalog redirected to Brightspace. Brightspace login and API access verified.' : 'Brightspace login and API access verified.' }
         : { state: 'connected', message: 'Browser session saved. API access is unavailable; browser retrieval can be tested.' };
     } finally { await browser.close().catch(() => undefined); this.loginBrowser = undefined; }
   }
 
-  async logout(): Promise<void> { await this.close(); await this.vault.clear(); this.status = { state: 'idle', message: 'Local Brightspace session removed.' }; }
-  async close(): Promise<void> { this.cancelLogin = true; await this.loginBrowser?.close().catch(() => undefined); await this.loginTask; }
+  async logout(): Promise<void> {
+    await this.close();
+    const saved = await this.vault.load().catch(() => null);
+    try {
+      if (this.config.baseUrl === 'https://brightspace.tudelft.nl' && saved?.origin === this.config.baseUrl && saved.identity) {
+        await new SharedSso(this.config).forget(saved.identity.id);
+      }
+    } finally {
+      await this.vault.clear(); this.status = { state: 'idle', message: 'Local Brightspace and shared university sign-in removed.' };
+    }
+  }
+  async close(): Promise<void> { this.generation++; this.cancelLogin = true; await this.loginBrowser?.close().catch(() => undefined); await this.loginTask; }
 }

@@ -55,12 +55,15 @@ test('logout cancels login while browser launch is still pending', async () => {
   assert.match(auth.status.message, /cancelled/);
 });
 
-function loginFixture() {
-  const saved = { origin: config.baseUrl, storage: { cookies: [{ name: 'old', value: 'synthetic-old', domain: 'school.example' }], origins: [] }, savedAt: 'previous', identity: { id: '42', name: 'Previous Student' } };
+function loginFixture(activeConfig: Config = config) {
+  const saved = { origin: activeConfig.baseUrl, storage: { cookies: [{ name: 'old', value: 'synthetic-old', domain: 'school.example' }], origins: [] }, savedAt: 'previous', identity: { id: '42', name: 'Previous Student' } };
   const state = { saved: structuredClone(saved) as any, fingerprint: 'original', options: {} as any, saves: 0, closed: false,
-    url: config.baseUrl + '/d2l/home', errorText: '', errorProbeNavigates: false, identity: { Identifier: '42', FirstName: 'Current', LastName: 'Student' } as any,
+    url: activeConfig.baseUrl + '/d2l/home', errorText: '', errorProbeNavigates: false, identity: { Identifier: '42', FirstName: 'Current', LastName: 'Student' } as any,
+    ssoSaves: 0, launchOptions: {} as any, passwordRequired: false,
     beforeIdentity: undefined as (() => Promise<void>) | undefined, beforeCommit: undefined as (() => Promise<void>) | undefined };
-  const auth = new Auth(config);
+  const auth = new Auth(activeConfig);
+  mock.method(auth, 'sso', async (accountId: string) => ({ accountId, cookies: [{ name: 'sso', value: 'synthetic-shared', domain: 'login.tudelft.nl', path: '/', expires: -1, secure: true, httpOnly: true, sameSite: 'Lax' }],
+    save: async (_cookies: unknown, preCommit: () => void) => { preCommit(); state.ssoSaves++; } }));
   mock.method(auth.vault, 'fingerprint', async () => state.fingerprint);
   mock.method(auth.vault, 'load', async () => structuredClone(state.saved));
   mock.method(auth.vault, 'save', async (value: any, expected?: string | null, preCommit?: () => void) => {
@@ -70,14 +73,15 @@ function loginFixture() {
   });
   mock.method(globalThis, 'fetch', async () => Response.json([{ ProductCode: 'lp', LatestVersion: '1.0' }, { ProductCode: 'le', LatestVersion: '1.0' }]));
   const page = { url: () => state.url, isClosed: () => state.closed, goto: async () => undefined, waitForLoadState: async () => undefined,
+    locator: () => ({ first: () => ({ isVisible: async () => state.passwordRequired }) }),
     waitForTimeout: async () => { await immediate(); }, evaluate: async () => {
       if (state.url.includes('engine.surfconext.nl')) {
-        if (state.errorProbeNavigates) { state.url = config.baseUrl + '/d2l/home'; throw new Error('Execution context destroyed while navigating a private-url.'); }
+        if (state.errorProbeNavigates) { state.url = activeConfig.baseUrl + '/d2l/home'; throw new Error('Execution context destroyed while navigating a private-url.'); }
         return state.errorText;
       }
       return { bearer: 'synthetic-bearer' };
     } };
-  mock.method(chromium, 'launch', async () => ({ close: async () => { state.closed = true; },
+  mock.method(chromium, 'launch', async (options: any) => { state.launchOptions = options; return { close: async () => { state.closed = true; },
     newContext: async (options: any) => { state.options = options; return {
       newPage: async () => page, on: () => undefined,
       cookies: async () => [{ name: 'd2lSessionVal', value: 'synthetic-current', expires: -1 }],
@@ -86,7 +90,7 @@ function loginFixture() {
         ok: () => true, headers: () => ({ 'content-type': 'application/json' }), json: async () => state.identity, dispose: async () => undefined,
       }; } },
     }; },
-  } as unknown as Browser));
+  } as unknown as Browser; });
   return { auth, state, saved };
 }
 async function until(predicate: () => boolean): Promise<void> {
@@ -173,4 +177,32 @@ test('error-page observation tolerates a normal assertion redirect destroying th
   auth.beginLogin('brightspace', { fresh: true }); const status = await auth.waitForLogin();
   assert.equal(status.state, 'connected'); assert.equal(state.saves, 1); assert.equal(state.saved.identity.id, '42');
   assert.equal(JSON.stringify(status).includes('private-'), false);
+});
+
+test('a damaged saved session can still be removed by local logout', async () => {
+  const auth = new Auth(config); let cleared = false;
+  mock.method(auth.vault, 'load', async () => { throw new BrightspaceError('VAULT_ERROR', 'Synthetic damaged session.'); });
+  mock.method(auth.vault, 'clear', async () => { cleared = true; });
+  await auth.logout(); assert.equal(cleared, true);
+});
+
+test('TU Delft silent renewal uses shared SSO and saves only the verified existing account', async () => {
+  const { auth, state } = loginFixture({ ...config, baseUrl: 'https://brightspace.tudelft.nl' });
+  assert.equal(await auth.renewSso('42'), true);
+  assert.equal(state.launchOptions.headless, true); assert.equal(state.ssoSaves, 1); assert.equal(state.saves, 1);
+  assert.equal(state.options.storageState.cookies.some((cookie: any) => cookie.value === 'synthetic-shared'), true);
+});
+
+test('silent Brightspace renewal cannot replace the account when SSO returns a different user', async () => {
+  const { auth, state } = loginFixture({ ...config, baseUrl: 'https://brightspace.tudelft.nl' });
+  state.identity.Identifier = '99';
+  assert.equal(await auth.renewSso('42'), false);
+  assert.equal(state.saves, 0); assert.equal(state.ssoSaves, 0); assert.equal(state.saved.identity.id, '42');
+});
+
+test('silent Brightspace renewal stops on required interaction and retains the previous session', async () => {
+  const { auth, state } = loginFixture({ ...config, baseUrl: 'https://brightspace.tudelft.nl' });
+  state.url = 'https://login.tudelft.nl/sso/login'; state.passwordRequired = true;
+  assert.equal(await auth.renewSso('42'), false);
+  assert.equal(state.saves, 0); assert.equal(state.ssoSaves, 0); assert.equal(state.closed, true);
 });
