@@ -137,6 +137,19 @@ export class BrowserReader {
   private discoveryUrl?: string;
   constructor(readonly auth: Auth) {}
   async open(input: string, catalog = false): Promise<BrowserPage> {
+    const expectedAccount = (await this.auth.session()).identity?.id;
+    try { return await this.openSaved(input, catalog); }
+    catch (error) {
+      if (!(error instanceof BrightspaceError) || error.code !== 'AUTH_REQUIRED' || catalog
+        || this.auth.config.baseUrl !== 'https://brightspace.tudelft.nl') throw error;
+      const session = await this.auth.session();
+      if (session.identity?.id !== expectedAccount) throw new BrightspaceError('ACCOUNT_CHANGED', 'The Brightspace account changed before course-page renewal.');
+      if (!session.identity?.id || !await this.auth.renewSso(session.identity.id)) throw error;
+      if ((await this.auth.session()).identity?.id !== expectedAccount) throw new BrightspaceError('ACCOUNT_CHANGED', 'The Brightspace account changed during course-page renewal.');
+      return this.openSaved(input, catalog);
+    }
+  }
+  private async openSaved(input: string, catalog = false): Promise<BrowserPage> {
     const origin = catalog ? this.auth.config.catalogUrl : this.auth.config.baseUrl;
     let url = validateReadPage(input, origin);
     const session = await this.auth.session();

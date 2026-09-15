@@ -21,6 +21,99 @@ function fixture(get: (url: string, options: any) => Promise<unknown>, post: (ur
 }
 afterEach(() => mock.restoreAll());
 
+function uploadFixture(post: (url: string, options: any) => Promise<unknown>) {
+  return fixture(async () => response(200, { Identifier: 42 }), async (url, options) => {
+    if (url.endsWith('/oauth2/token')) return response(200, { access_token: 'synthetic-upload-token' });
+    return post(url, options);
+  });
+}
+
+test('upload silently refreshes the saved token before sending files once', async () => {
+  const calls: string[] = [];
+  const { client } = fixture(async () => response(200, { Identifier: 42 }), async (url, options) => {
+    if (url.endsWith('/oauth2/token')) {
+      calls.push('refresh');
+      return response(200, { access_token: 'synthetic-upload-token' });
+    }
+    calls.push('upload');
+    assert.equal(options.headers.Authorization, 'Bearer synthetic-upload-token');
+    return response(200, { Id: 123 });
+  });
+  try {
+    await client.postMultipart('le', '123/dropbox/folders/456/submissions/mysubmissions/', Buffer.from('test'), 'multipart/mixed; boundary=test');
+    assert.deepEqual(calls, ['refresh', 'upload']);
+  } finally { await client.close(); }
+});
+
+test('upload refresh falls back to silent SSO and verifies the same account', async () => {
+  let uploads = 0, renewals = 0;
+  const { client, auth, session } = fixture(async () => response(200, { Identifier: 42 }), async (url, options) => {
+    if (url.endsWith('/oauth2/token')) return response(401);
+    uploads++;
+    assert.equal(options.headers.Authorization, 'Bearer synthetic-sso-token');
+    return response(200, { Id: 123 });
+  }, { ...config, baseUrl: 'https://brightspace.tudelft.nl' });
+  mock.method(auth, 'renewSso', async (id: string) => {
+    assert.equal(id, '42'); renewals++;
+    session().bearer = 'synthetic-sso-token'; session().savedAt = 'sso-refreshed';
+    return true;
+  });
+  try {
+    await client.postMultipart('le', '123/dropbox/folders/456/submissions/mysubmissions/', Buffer.from('test'), 'multipart/mixed; boundary=test');
+    assert.equal(renewals, 1); assert.equal(uploads, 1);
+  } finally { await client.close(); }
+});
+
+test('failed silent upload refresh sends no files and does not open interactive login', async () => {
+  let uploads = 0;
+  const { client, auth } = fixture(async () => response(200, { Identifier: 42 }), async (url) => {
+    if (url.endsWith('/oauth2/token')) return response(401);
+    uploads++; return response(200);
+  }, { ...config, baseUrl: 'https://brightspace.tudelft.nl' });
+  let interactive = 0;
+  auth.beginLogin = () => { interactive++; return { state: 'waiting', message: 'Unexpected login' }; };
+  try {
+    await assert.rejects(client.postMultipart('le', '123/dropbox/folders/456/submissions/mysubmissions/', Buffer.from('test'), 'multipart/mixed; boundary=test'), { code: 'AUTH_REQUIRED' });
+    assert.equal(uploads, 0); assert.equal(interactive, 0);
+  } finally { await client.close(); }
+});
+
+test('a refreshed upload identity must match the account checked before renewal', async () => {
+  let refreshed = false, uploads = 0;
+  const { client } = fixture(async () => response(200, { Identifier: refreshed ? 99 : 42 }), async (url) => {
+    if (url.endsWith('/oauth2/token')) { refreshed = true; return response(200, { access_token: 'synthetic-upload-token' }); }
+    uploads++; return response(200);
+  });
+  try {
+    await assert.rejects(client.postMultipart('le', '123/dropbox/folders/456/submissions/mysubmissions/', Buffer.from('test'), 'multipart/mixed; boundary=test'), { code: 'ACCOUNT_CHANGED' });
+    assert.equal(uploads, 0);
+  } finally { await client.close(); }
+});
+
+test('upload authentication rejection is never automatically retried', async () => {
+  let uploads = 0;
+  const { client } = uploadFixture(async () => { uploads++; return response(401); });
+  try {
+    await assert.rejects(client.postMultipart('le', '123/dropbox/folders/456/submissions/mysubmissions/', Buffer.from('test'), 'multipart/mixed; boundary=test'), { code: 'AUTH_REQUIRED' });
+    assert.equal(uploads, 1);
+  } finally { await client.close(); }
+});
+
+test('a vault replacement during token renewal cannot be overwritten or used for upload', async () => {
+  let uploads = 0;
+  const { client, session } = fixture(async () => response(200, { Identifier: 42 }), async url => {
+    if (url.endsWith('/oauth2/token')) {
+      session().identity = { id: '99', name: 'Replacement Student' }; session().savedAt = 'replacement';
+      return response(200, { access_token: 'synthetic-renewed-token' });
+    }
+    uploads++; return response(200);
+  });
+  try {
+    await assert.rejects(client.postMultipart('le', '123/dropbox/folders/456/submissions/mysubmissions/', Buffer.from('test'), 'multipart/mixed; boundary=test'), { code: 'ACCOUNT_CHANGED' });
+    assert.equal(uploads, 0); assert.equal(session().identity?.id, '99');
+  } finally { await client.close(); }
+});
+
 test('expired TU Delft API and browser tokens fall back to shared SSO once for concurrent reads', async () => {
   let connected = false, renewals = 0;
   const { client, auth, session } = fixture(async () => connected ? response(200, { verified: true }) : response(401),
@@ -121,7 +214,7 @@ test('maps an HTML login response to reconnect without returning the page', asyn
 test('never retries a submission with an unknown network or server outcome', async () => {
   for (const kind of ['network', 'server']) {
     let posts = 0;
-    const { client } = fixture(async () => response(200), async (_url, options) => {
+    const { client } = uploadFixture(async (_url, options) => {
       posts++;
       assert.equal(options.maxRetries, 0);
       assert.equal(options.maxRedirects, 0);
@@ -136,7 +229,7 @@ test('never retries a submission with an unknown network or server outcome', asy
 });
 
 test('returns the structured upload receipt', async () => {
-  const { client } = fixture(async () => response(200), async () => response(201, { Id: 42 }));
+  const { client } = uploadFixture(async () => response(201, { Id: 42 }));
   try { assert.deepEqual(await client.postMultipart('le', '123/dropbox/folders/456/submissions/mysubmissions/', Buffer.from('test'), 'multipart/mixed; boundary=test'), { status: 201, data: { Id: 42 } }); }
   finally { await client.close(); }
 });
@@ -166,7 +259,7 @@ test('download enforces streaming byte limit when Content-Length is missing', as
 
 
 test('accepts an empty successful submission response for receipt verification', async () => {
-  const { client } = fixture(async () => response(200), async (_url, options) => {
+  const { client } = uploadFixture(async (_url, options) => {
     assert.equal(options.headers['Content-Length'], '4');
     return response(200, '', {});
   });
@@ -177,7 +270,7 @@ test('accepts an empty successful submission response for receipt verification',
 test('redirects and HTML upload responses are ambiguous and never retried', async () => {
   for (const status of [200, 302]) {
     let calls = 0;
-    const { client } = fixture(async () => response(200), async () => { calls++; return response(status, '<html>session</html>', { 'content-type': 'text/html' }); });
+    const { client } = uploadFixture(async () => { calls++; return response(status, '<html>session</html>', { 'content-type': 'text/html' }); });
     try {
       await assert.rejects(client.postMultipart('le', '123/dropbox/folders/456/submissions/mysubmissions/', Buffer.from('test'), 'multipart/mixed; boundary=test'), { code: 'SUBMISSION_OUTCOME_UNKNOWN' });
       assert.equal(calls, 1);

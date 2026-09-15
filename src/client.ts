@@ -91,6 +91,7 @@ export class BrightspaceClient {
   private async renew(expiredBearer?: string): Promise<boolean> {
     if (this.state?.bearer && this.state.bearer !== expiredBearer) return true;
     this.renewing ??= (async () => {
+      const expectedFingerprint = await this.auth.vault.fingerprint();
       const latest = await this.auth.session();
       this.assertSameAccount(latest);
       if (latest.savedAt !== this.state?.savedAt || latest.bearer !== this.state?.bearer) {
@@ -110,8 +111,9 @@ export class BrightspaceClient {
         this.context = context; this.state = reconnected;
         return true;
       }
-      this.state = { ...this.state!, bearer, storage: await this.context!.storageState(), savedAt: new Date().toISOString() };
-      await this.auth.vault.save(this.state);
+      const refreshed = { ...this.state!, bearer, storage: await this.context!.storageState(), savedAt: new Date().toISOString() };
+      await this.auth.vault.save(refreshed, expectedFingerprint);
+      this.state = refreshed;
       return true;
     })().finally(() => { this.renewing = undefined; });
     return this.renewing;
@@ -182,9 +184,23 @@ export class BrightspaceClient {
     return { items, complete: false, ...(bookmark ? { nextBookmark: bookmark } : {}), ...(nextUrl ? { nextUrl } : {}) };
   }
 
+  async refreshSession(): Promise<NonNullable<Session['identity']>> {
+    // Read access can survive after the credentials needed for uploads expire.
+    // Refresh before sending any file bytes; never retry the submission POST.
+    const expectedAccount = (await this.verifyIdentity()).id;
+    if (!await this.renew(this.state?.bearer)) {
+      throw new BrightspaceError('AUTH_REQUIRED', 'The saved Brightspace session could not be refreshed silently. No upload was sent and no login window was opened. Interactive sign-in is required.');
+    }
+    if ((await this.verifyIdentity()).id !== expectedAccount) {
+      throw new BrightspaceError('ACCOUNT_CHANGED', 'The Brightspace account changed during upload authentication. No upload was sent.');
+    }
+    await this.verifyAccount();
+    return this.state!.identity!;
+  }
+
   async postMultipart(product: 'lp' | 'le', path: string, body: Buffer, contentType: string): Promise<{ status: number; data: unknown }> {
     const url = await this.apiUrl(product, path);
-    await this.verifyAccount();
+    await this.refreshSession();
     let response;
     try {
       response = await this.context!.post(url, {

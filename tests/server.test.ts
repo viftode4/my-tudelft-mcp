@@ -105,8 +105,8 @@ test('MCP fresh login is opt-in and forwards the exact recovery option', async (
   const f = await fixture(), calls: unknown[][] = [];
   mock.method(f.auth, 'beginLogin', (...args: unknown[]) => { calls.push(args); return { state: 'waiting', message: 'Complete university sign-in.' }; });
   try {
-    assert.equal((await f.client.callTool({ name: 'begin_login', arguments: {} })).isError, undefined);
-    assert.equal((await f.client.callTool({ name: 'begin_login', arguments: { fresh: true } })).isError, undefined);
+    assert.equal((await f.client.callTool({ name: 'begin_login', arguments: { interactive: true } })).isError, undefined);
+    assert.equal((await f.client.callTool({ name: 'begin_login', arguments: { fresh: true, interactive: true } })).isError, undefined);
     assert.deepEqual(calls, [['brightspace', { fresh: false }], ['brightspace', { fresh: true }]]);
     const invalid = await f.client.callTool({ name: 'begin_login', arguments: { fresh: 'true' } });
     assert.equal(invalid.isError, true);
@@ -216,7 +216,7 @@ test('MCP exposes recording login status, exact metadata reads and combined logo
   const logout = f.auth.logout.bind(f.auth);
   mock.method(f.auth, 'logout', async () => { events.push('brightspace-logout'); await logout(); });
   try {
-    assert.equal(decode(await f.client.callTool({ name: 'begin_recording_login', arguments: { courseId: '123', topicId: '456' } })).state, 'waiting');
+    assert.equal(decode(await f.client.callTool({ name: 'begin_recording_login', arguments: { courseId: '123', topicId: '456', interactive: true } })).state, 'waiting');
     assert.deepEqual(calls[0], ['123', '456']);
     assert.equal(decode(await f.client.callTool({ name: 'get_recording_login_status', arguments: {} })).state, 'waiting');
     const read = await f.client.callTool({ name: 'read_recording', arguments: { courseId: '123', topicId: '456', offset: 100, maxChars: 200 } });
@@ -234,7 +234,7 @@ test('MCP keeps official results separate and preserves exact result IDs and pag
   mock.method(MyTuDelft.prototype, 'grades', async (...args: unknown[]) => { calls.push(args); return { source: 'official_osiris_api', items: [], complete: false, nextOffset: 50 }; });
   mock.method(MyTuDelft.prototype, 'grade', async (...args: unknown[]) => { calls.push(args); return { source: 'official_osiris_api', item: { id: 'result_123' } }; });
   try {
-    assert.equal(decode(await f.client.callTool({ name: 'begin_mytu_login', arguments: {} })).state, 'waiting');
+    assert.equal(decode(await f.client.callTool({ name: 'begin_mytu_login', arguments: { interactive: true } })).state, 'waiting');
     assert.equal(decode(await f.client.callTool({ name: 'get_mytu_login_status', arguments: {} })).state, 'waiting');
     const page = decode(await f.client.callTool({ name: 'list_official_grades', arguments: { offset: 25 } }));
     assert.equal(page.source, 'official_osiris_api'); assert.equal(page.complete, false); assert.equal(page.nextOffset, 50);
@@ -276,7 +276,7 @@ test('Brightspace account switches and logout close linked services before chang
   mock.method(f.auth, 'beginLogin', () => { events.push('brightspace-login'); return { state: 'idle', message: 'Synthetic login' }; });
   mock.method(f.auth, 'logout', async () => { events.push('brightspace-logout'); });
   try {
-    await f.client.callTool({ name: 'begin_login', arguments: {} });
+    await f.client.callTool({ name: 'begin_login', arguments: { interactive: true } });
     assert.deepEqual(events, ['mytu-close', 'mail-close', 'brightspace-login']);
     events.length = 0;
     await f.client.callTool({ name: 'logout', arguments: {} });
@@ -357,7 +357,7 @@ test('interactive login gates account operations while allowing status and cance
   mock.method(f.auth, 'beginLogin', () => { assert.deepEqual(events, ['resources-cleared']); events.push('login-opened'); f.auth.status = { state: 'waiting', message: 'Test login pending' }; return f.auth.status; });
   mock.method(f.app.service, 'checkAuth', async () => { checked++; return { connected: true }; });
   try {
-    assert.equal(decode(await f.client.callTool({ name: 'begin_login', arguments: {} })).state, 'waiting');
+    assert.equal(decode(await f.client.callTool({ name: 'begin_login', arguments: { interactive: true } })).state, 'waiting');
     assert.equal(decode(await f.client.callTool({ name: 'check_auth', arguments: {} })).error.code, 'LOGIN_IN_PROGRESS');
     assert.equal(checked, 0);
     assert.equal(decode(await f.client.callTool({ name: 'get_login_status', arguments: {} })).state, 'waiting');
@@ -477,5 +477,24 @@ test('MCP routes group selection and file chunks exactly, with download disabled
     assert.equal(decode(recordings).complete, false);
     await f.client.callTool({ name: 'get_my_progress', arguments: { courseId: '123', section: 'content' } });
     assert.deepEqual(calls[4], ['123', 'content']);
+  } finally { await f.close(); }
+});
+
+
+test('all visible login tools require explicit interactive opt-in before doing work', async () => {
+  const f = await fixture();
+  const opened: string[] = [];
+  mock.method(f.auth, 'beginLogin', () => { opened.push('brightspace'); return { state: 'waiting', message: 'login' }; });
+  mock.method(MyTuDelft.prototype, 'beginLogin', async () => { opened.push('mytu'); return { state: 'waiting', message: 'login' }; });
+  mock.method(Collegerama.prototype, 'beginLogin', async () => { opened.push('recording'); return { state: 'waiting', message: 'login' }; });
+  mock.method(UniversityMail.prototype, 'beginLogin', () => { opened.push('mail'); return { state: 'waiting', message: 'login' }; });
+  try {
+    for (const name of ['begin_login', 'begin_mytu_login', 'begin_recording_login', 'begin_mail_login']) {
+      const target = name === 'begin_recording_login' ? { courseId: '123', topicId: '456' } : {};
+      for (const args of [target, { ...target, interactive: false }]) {
+        assert.equal((await f.client.callTool({ name, arguments: args })).isError, true, name);
+      }
+    }
+    assert.deepEqual(opened, []);
   } finally { await f.close(); }
 });

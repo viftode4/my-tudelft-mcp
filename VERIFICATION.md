@@ -9,12 +9,16 @@ The current source passed on Windows with Node 25 and PowerShell 7:
 | Check | Result |
 | --- | --- |
 | `npm run check` | Passed |
-| `npm test` | 491 passed, 0 failed, 0 skipped |
+| `npm test` | 504 passed, 0 failed, 0 skipped |
 | `npm run build` | Passed |
 | `npm audit` | No known vulnerabilities at the recorded check |
 | MCP interface | 78 tools; startup/shutdown and structured JSON-RPC output covered; compiled timetable worker and tool discovery smoke passed |
 
 Dependencies and service behavior can change. Run these checks in the current checkout rather than treating this table as a permanent guarantee.
+
+The silent-refresh update passed the full suite, build and credential-free startup smoke on Windows. Focused client/Collegerama tests reached 94.04% combined line coverage. A separate read-only check refreshed the saved Brightspace credentials and reverified the same account with zero browser launches and zero submission requests. Automatic Collegerama renewal and the visible-login opt-in are verified with synthetic fixtures; this update does not claim a new live login test for every provider or platform.
+
+All four visible login tools now require literal `interactive: true`. Routine Brightspace uploads refresh credentials before sending file bytes, preserve account binding across renewal and never retry a submission POST. Course-page readers and existing Collegerama sessions use bounded silent reconnection; password requirements stop without a visible fallback. Email retains its process-local SDK session policy.
 
 A fresh source-only installation of this update passed `npm ci`, Chromium installation, typecheck, build, credential-free MCP startup/resource discovery and generated host configuration with all 78 tools. It contained no university sessions or downloaded student data and did not require the optional mail SDK. The new `scripts/smoke-install.mjs` also runs in CI on Windows, Ubuntu and macOS; Windows installs the pinned Graph SDK for offline compatibility checks. Automated tests do not log into university services.
 

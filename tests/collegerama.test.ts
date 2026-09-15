@@ -26,7 +26,7 @@ function fixture() {
     calls: [] as { path: string; provider?: boolean; method?: string; authorization?: string }[], saved: [] as Row[], cleared: 0,
     payload: metadata() as unknown, providerStatus: 200, tokenExposed: true, browserClosed: 0, launchOptions: {} as Row,
     storageSeed: {} as Row, routes: [] as unknown[], afterUserinfo: undefined as (() => void) | undefined,
-    afterMetadata: undefined as (() => void) | undefined, fetchFailure: false,
+    afterMetadata: undefined as (() => void) | undefined, fetchFailure: false, passwordRequired: false, launches: 0,
   };
   const client = {
     config: { baseUrl: origin }, sessionIdentity: async () => state.accountId,
@@ -69,8 +69,9 @@ function fixture() {
   const locator = { or() { return this; }, filter() { return this; }, first() { return this; }, count: async () => 1, click: async () => undefined };
   const page = { goto: async () => undefined, isClosed: () => state.browserClosed > 0, url: () => url,
     evaluate: async () => state.tokenExposed ? JSON.stringify({ access_token: 'private-provider-token', expires_at: Math.floor((Date.now() + 3600_000) / 1000), profile: { sub: claims.sub } }) : null,
+    locator: () => ({ first() { return this; }, isVisible: async () => state.passwordRequired }),
     getByRole: () => locator, waitForTimeout: async () => { await immediate(); } };
-  mock.method(chromium, 'launch', async (options: Row) => { state.launchOptions = options; return {
+  mock.method(chromium, 'launch', async (options: Row) => { state.launchOptions = options; state.launches++; return {
     close: async () => { state.browserClosed++; }, newContext: async (options: Row) => { state.storageSeed = options.storageState as Row; return {
       routeWebSocket: async () => undefined, route: async (_pattern: string, handler: unknown) => { state.routes.push(handler); }, newPage: async () => page,
       storageState: async () => ({ cookies: [], origins: [] }),
@@ -116,9 +117,9 @@ test('read verifies the current course and provider account before returning exa
   assert.equal(record(result.transcript).status, 'not_read'); assert.equal(JSON.stringify(result).includes('private-'), false);
 });
 
-test('absent, expired or incorrectly pinned provider state never produces an authenticated request', async () => {
+test('absent or incorrectly pinned provider state never produces an authenticated request', async () => {
   const { reader, state } = fixture();
-  for (const provider of [null, { ...providerState(), expiresAt: Date.now() - 1 }, { ...providerState(), accountId: '99' }, { ...providerState(), authority: 'https://other.example' }, { ...providerState(), providerOrigin: 'https://other.example' }]) {
+  for (const provider of [null, { ...providerState(), accountId: '99' }, { ...providerState(), authority: 'https://other.example' }, { ...providerState(), providerOrigin: 'https://other.example' }]) {
     state.provider = provider; await assert.rejects(reader.read('123', '456'), { code: 'RECORDING_AUTH_REQUIRED' });
   }
   assert.equal(state.calls.some(call => call.provider), false);
@@ -167,11 +168,11 @@ test('account or provider-vault replacement during reads blocks further requests
   await assert.rejects(reader.read('123', '456'), { code: 'RECORDING_SESSION_CHANGED' });
 });
 
-test('provider failures and redirects are sanitized, never followed or retried', async () => {
+test('provider failures are sanitized and only authentication failure gets one silent renewal', async () => {
   const { reader, state } = fixture();
   for (const [status, code] of [[401, 'RECORDING_AUTH_REQUIRED'], [302, 'RECORDING_AUTH_REQUIRED'], [403, 'RECORDING_PERMISSION_DENIED'], [500, 'RECORDING_UNAVAILABLE']] as const) {
     state.providerStatus = status; state.calls.length = 0; await assert.rejects(reader.read('123', '456'), { code });
-    assert.equal(state.calls.filter(call => call.provider).length, 1);
+    assert.equal(state.calls.filter(call => call.provider).length, status === 401 ? 2 : 1);
   }
   state.fetchFailure = true;
   await assert.rejects(reader.read('123', '456'), (error: any) => error.code === 'RECORDING_UNAVAILABLE' && !error.message.includes('private-'));
@@ -347,4 +348,31 @@ test('redirect diagnostics distinguish unsafe replay, non-navigation redirects a
   assert.equal(unknownPost.state.failure?.details?.reason, 'unrecognized_surf_engine_post_path'); assert.equal(unknownPost.fetched, 0);
   const oversizedOrigin = await guardedResponse('https://' + 'x'.repeat(210) + '.example/private-path', 'POST', 200, '');
   assert.equal(record(oversizedOrigin.state.failure?.details?.request).origin, '[unrecognized origin]');
+});
+
+test('recording refresh without saved SSO stops before browser launch', async () => {
+  const { reader, state, auth } = fixture(); state.provider!.expiresAt = Date.now() - 1;
+  mock.method(auth, 'sso', async () => ({ cookies: [], save: async () => undefined }) as any);
+  await assert.rejects(reader.read('123', '456'), { code: 'RECORDING_AUTH_REQUIRED' });
+  assert.equal(state.launches, 0); assert.equal(state.saved.length, 0);
+  await reader.close();
+});
+
+test('expired recording access silently renews once for concurrent metadata reads', async () => {
+  const { reader, state } = fixture(); state.provider!.expiresAt = Date.now() - 1;
+  const results = await Promise.all([reader.read('123', '456'), reader.read('123', '456')]);
+  assert.ok(results.every(result => result.metadataVerified));
+  assert.equal(state.launches, 1); assert.equal(state.launchOptions.headless, true);
+  assert.equal(state.saved.length, 1);
+  await reader.close();
+});
+
+test('recording refresh stops at a password prompt and never opens a visible fallback', async () => {
+  const { reader, state } = fixture(); state.provider!.expiresAt = Date.now() - 1;
+  state.tokenExposed = false; state.passwordRequired = true;
+  await assert.rejects(reader.read('123', '456'), { code: 'RECORDING_AUTH_REQUIRED' });
+  await assert.rejects(reader.read('123', '456'), { code: 'RECORDING_AUTH_REQUIRED' });
+  assert.equal(state.launches, 1); assert.equal(state.launchOptions.headless, true);
+  assert.equal(state.saved.length, 0);
+  await reader.close();
 });

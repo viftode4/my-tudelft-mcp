@@ -28,6 +28,13 @@ Never publish browser snapshots or real student data. Review staged changes.
 
 ## Authentication and actions
 
+Routine session renewal must never open a visible browser window. Check saved
+provider authentication first; Brightspace `check_auth` accepts `refresh: true`
+when reads work but upload credentials need renewal. All `begin_*_login` tools
+require `interactive: true` and the student's explicit request for a login window.
+An authentication error alone does not authorize opening one. Report password,
+MFA or consent requirements when silent refresh cannot complete.
+
 Never import another browser profile or request passwords/MFA in chat. Start one
 interactive login at a time and poll status. Stop automatic retries on an admin
 denial; do not bypass access restrictions. Preserve account checks and allowlists.

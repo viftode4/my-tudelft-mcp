@@ -176,9 +176,9 @@ export class StudentService {
         warning: 'Visible browser content may omit paginated or unopened sections.' };
     }
   }
-  async checkAuth(): Promise<Row> {
+  async checkAuth(refresh = false): Promise<Row> {
     await this.client.reset();
-    const identity = await this.client.verifyIdentity();
+    const identity = refresh ? await this.client.refreshSession() : await this.client.verifyIdentity();
     return { ...this.meta(), connected: true, identity, login: this.auth.status };
   }
   async courses(query?: string, activeOnly = true): Promise<Row> {

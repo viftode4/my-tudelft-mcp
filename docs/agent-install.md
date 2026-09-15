@@ -53,8 +53,11 @@ itself, tell the student that one host restart is required.
 
 ## Authenticate once
 
-Call `check_auth` first. Reuse a connected account. Otherwise call `begin_login`
-once, tell the student to finish sign-in in that window, and poll
+Call `check_auth` first. Reuse a connected account. Use `refresh: true` for a
+silent credential refresh, including when reads work but uploads fail. Routine
+renewal must not open a visible window. If interactive sign-in is required,
+explain that and wait for the student's explicit request to open a window.
+Then call `begin_login` with `interactive: true` once and poll
 `get_login_status`. Terminal alternative: `npm run login`, then `npm run doctor`.
 Never ask for passwords, MFA, cookies or tokens in chat. Never navigate to copied
 SSO callback URLs or repeatedly open browsers. Without a graphical desktop,

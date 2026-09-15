@@ -241,6 +241,8 @@ export class Collegerama {
   private loginTask?: Promise<void>;
   private browser?: Browser;
   private currentAccount?: string;
+  private renewing?: Promise<void>;
+  private failedSilentAt = 0;
   constructor(private readonly auth: Auth, private readonly client: Client) {}
 
   status(): RecordingLoginStatus { return structuredClone(this.loginState); }
@@ -327,28 +329,32 @@ export class Collegerama {
     } finally { if (!response.body?.locked) await response.body?.cancel().catch(() => undefined); }
   }
 
-  private async login(target: Target, generation: number): Promise<void> {
+  private async login(target: Target, generation: number, silent = false): Promise<void> {
     const accountId = target.identity.accountId, vault = this.vault(accountId), expected = await vault.fingerprint();
     const saved = await this.auth.session();
     if (saved.identity?.id !== accountId) throw new BrightspaceError('ACCOUNT_CHANGED', 'The saved Brightspace account changed before recording login.');
     // Reuse only the normal TU/SURF SSO cookies; never transfer Brightspace bearer/cookies/storage.
     const shared = await this.auth.sso(accountId), cookies = shared.cookies;
     await this.unchanged(accountId, generation);
+    if (silent && !cookies.length) throw new BrightspaceError('RECORDING_AUTH_REQUIRED', 'Saved university sign-in cannot renew Collegerama. No login window was opened.');
     let browser: Browser | undefined;
     try {
-      browser = await chromium.launch({ headless: false, channel: this.auth.config.browserChannel }); this.browser = browser;
+      browser = await chromium.launch({ headless: silent, channel: this.auth.config.browserChannel }); this.browser = browser;
       await this.unchanged(accountId, generation);
       const context = await browser.newContext({ storageState: { cookies, origins: [] }, serviceWorkers: 'block', acceptDownloads: false });
       await context.routeWebSocket('**/*', socket => socket.close());
       const guard = await guardRecordingLogin(context, () => this.unchanged(accountId, generation));
       const page = await context.newPage();
       await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: this.auth.config.timeoutMs }).catch(error => { if (guard.failure) throw guard.failure; throw error; });
-      const deadline = Date.now() + LOGIN_MS;
+      const deadline = Date.now() + (silent ? 25_000 : LOGIN_MS);
       let clicked = false;
       while (Date.now() < deadline) {
         await this.unchanged(accountId, generation);
         if (guard.failure) throw guard.failure;
         if (page.isClosed()) throw new BrightspaceError('RECORDING_LOGIN_CANCELLED', 'The recording login browser was closed.');
+        if (silent && await page.locator('input[type="password"]').first().isVisible().catch(() => false)) {
+          throw new BrightspaceError('RECORDING_AUTH_REQUIRED', 'Collegerama needs interactive university sign-in. No login window was opened.');
+        }
         const location = new URL(page.url());
         if (location.origin === PORTAL) {
           const stored = await page.evaluate(key => localStorage.getItem(key), USER_KEY);
@@ -380,11 +386,35 @@ export class Collegerama {
         }
         await page.waitForTimeout(750);
       }
-      throw new BrightspaceError('RECORDING_LOGIN_TIMEOUT', 'The recording login timed out. Run begin_recording_login again.');
+      throw new BrightspaceError(silent ? 'RECORDING_AUTH_REQUIRED' : 'RECORDING_LOGIN_TIMEOUT', silent
+        ? 'Collegerama could not renew silently. Interactive sign-in or MFA is required; no login window was opened.'
+        : 'The recording login timed out. Run begin_recording_login again.');
     } finally { await browser?.close().catch(() => undefined); if (this.browser === browser) this.browser = undefined; }
   }
 
   async read(courseId: string, topicId: string, options: { offset?: number; maxChars?: number } = {}): Promise<Row> {
+    const generation = this.generation;
+    try { return await this.readCurrent(courseId, topicId, options); }
+    catch (error) {
+      if (!(error instanceof BrightspaceError) || error.code !== 'RECORDING_AUTH_REQUIRED') throw error;
+      const target = await this.target(courseId, topicId), session = await this.vault(target.identity.accountId).load();
+      await this.unchanged(target.identity.accountId, generation);
+      // Refresh only an existing correctly bound connection, never a logout or another account.
+      if (!session || session.version !== 1 || session.accountId !== target.identity.accountId
+        || session.brightspaceOrigin !== this.auth.config.baseUrl || session.providerOrigin !== PORTAL || session.authority !== CONNECT
+        || typeof session.accessToken !== 'string' || !session.accessToken || session.accessToken.length > 32_000 || !Number.isFinite(session.expiresAt)) throw error;
+      if (this.loginTask || this.starting) throw new BrightspaceError('LOGIN_IN_PROGRESS', 'Finish the existing recording login before refreshing.');
+      if (Date.now() - this.failedSilentAt < 60_000) throw error;
+      this.renewing ??= this.login(target, generation, true).catch((failure: unknown) => {
+        this.failedSilentAt = Date.now(); throw failure;
+      }).finally(() => { this.renewing = undefined; });
+      await this.renewing;
+      await this.unchanged(target.identity.accountId, generation);
+      return this.readCurrent(courseId, topicId, options);
+    }
+  }
+
+  private async readCurrent(courseId: string, topicId: string, options: { offset?: number; maxChars?: number }): Promise<Row> {
     const offset = options.offset ?? 0, maxChars = options.maxChars ?? 20_000;
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(maxChars) || maxChars < 1 || maxChars > 100_000) throw new BrightspaceError('INVALID_RANGE', 'Use a nonnegative text offset and between 1 and 100,000 characters.');
     const generation = this.generation, target = await this.target(courseId, topicId), accountId = target.identity.accountId;
@@ -420,7 +450,7 @@ export class Collegerama {
   async close(): Promise<void> {
     this.generation++;
     await this.browser?.close().catch(() => undefined);
-    await this.starting?.catch(() => undefined); await this.loginTask;
+    await this.starting?.catch(() => undefined); await this.loginTask; await this.renewing?.catch(() => undefined);
     this.loginState = { state: 'idle', message: 'The recording connection is closed. Saved recording access is checked when read_recording runs.' };
   }
   async logout(): Promise<void> {
