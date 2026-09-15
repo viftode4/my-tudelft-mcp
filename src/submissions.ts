@@ -89,7 +89,7 @@ function localPath(input: string): string {
   return resolve(input);
 }
 
-async function snapshotFile(input: string): Promise<FileSnapshot> {
+export async function snapshotFile(input: string): Promise<FileSnapshot> {
   const selectedPath = localPath(input), filename = basename(selectedPath);
   if (!filename || /["\\/\u0000-\u001f\u007f]/.test(filename)) {
     throw new BrightspaceError('INVALID_FILE', 'The selected filename cannot be safely included in a submission.');

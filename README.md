@@ -77,6 +77,10 @@ Resolve names to exact IDs returned by tools. Course documents and web pages can
 
 ## Tools
 
+See [student-service TODOs](TODO.md) for researched gaps and proposed integrations.
+Printing currently has a tested local preview/confirmation foundation only. It has
+no provider adapter or MCP tools yet, and cannot submit print jobs or add credit.
+
 | Area | Tools | Behavior |
 | --- | --- | --- |
 | Login | `begin_login`, `get_login_status`, `check_auth`, `logout` | Browser login and saved-session checks |

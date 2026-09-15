@@ -9,12 +9,26 @@ The current source passed on Windows with Node 25 and PowerShell 7:
 | Check | Result |
 | --- | --- |
 | `npm run check` | Passed |
-| `npm test` | 504 passed, 0 failed, 0 skipped |
+| `npm test` | 519 passed, 0 failed, 0 skipped |
 | `npm run build` | Passed |
 | `npm audit` | No known vulnerabilities at the recorded check |
 | MCP interface | 78 tools; startup/shutdown and structured JSON-RPC output covered; compiled timetable worker and tool discovery smoke passed |
 
 Dependencies and service behavior can change. Run these checks in the current checkout rather than treating this table as a permanent guarantee.
+
+### Printing foundation (not connected to MCP)
+
+The local `PrintActions` foundation has 15 synthetic tests covering file hashes,
+explicit settings, account/quote changes, one-use and expired previews, concurrent
+confirmation, cancellation and uncertain outcomes. Focused coverage is 100% of
+lines and 97.5% of branches. The full 519-test suite, typecheck, build and
+credential-free MCP smoke passed on Windows. The tool count remains 78.
+
+This proves local approval behavior with a fake transport only. There is no Campus
+Print provider adapter, authenticated queue verification, payment integration or
+printing MCP tool. Public portal and vendor documentation were inspected; a
+headless SSO attempt required sign-in, and authenticated inspection did not finish.
+No document was uploaded and no print job or payment was created. See [TODOs](TODO.md).
 
 The silent-refresh update passed the full suite, build and credential-free startup smoke on Windows. Focused client/Collegerama tests reached 94.04% combined line coverage. A separate read-only check refreshed the saved Brightspace credentials and reverified the same account with zero browser launches and zero submission requests. Automatic Collegerama renewal and the visible-login opt-in are verified with synthetic fixtures; this update does not claim a new live login test for every provider or platform.
 
