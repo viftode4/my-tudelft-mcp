@@ -82,7 +82,7 @@ test('MCP exposes student tools with schemas and accurate write annotations', as
   const f = await fixture();
   try {
     const { tools } = await f.client.listTools();
-    assert.equal(tools.length, 78);
+    assert.equal(tools.length, 84);
     assert.equal(new Set(tools.map((tool) => tool.name)).size, tools.length);
     for (const name of ['list_recordings', 'read_course_service', 'list_available_groups', 'prepare_group_enrollment', 'search_study_guide', 'get_study_guide', 'list_group_locker_files', 'read_group_locker_file']) assert.ok(tools.some((tool) => tool.name === name), name);
     for (const name of ['begin_recording_login', 'get_recording_login_status', 'read_recording']) assert.ok(tools.some((tool) => tool.name === name), name);
@@ -497,4 +497,25 @@ test('all visible login tools require explicit interactive opt-in before doing w
     }
     assert.deepEqual(opened, []);
   } finally { await f.close(); }
+});
+
+import { PublicCampus } from '../src/public-campus.js';
+import { ExamPlanning } from '../src/exam-planning.js';
+test('campus and exam MCP tools expose read-only schemas and forward explicit inputs', async () => {
+ const f = await fixture(), calls: unknown[] = [];
+ mock.method(PublicCampus.prototype, 'software', async (...a: unknown[]) => { calls.push(a); return { items: [], complete: true }; });
+ mock.method(PublicCampus.prototype, 'softwareDetail', async (...a: unknown[]) => { calls.push(a); return { name: 'Example' }; });
+ mock.method(PublicCampus.prototype, 'notices', async (...a: unknown[]) => { calls.push(a); return { items: [], complete: true }; });
+ mock.method(ExamPlanning.prototype, 'overview', async (...a: unknown[]) => { calls.push(a); return { complete: true }; });
+ try {
+  const { tools } = await f.client.listTools();
+  for (const name of ['get_exam_planning_overview', 'search_software', 'get_software', 'search_teaching_rooms', 'search_study_spaces', 'get_ict_notices']) assert.equal(tools.find(t => t.name === name)?.annotations?.readOnlyHint, true);
+  await f.client.callTool({name:'search_software',arguments:{query:'editor',offset:25}});
+  await f.client.callTool({name:'get_software',arguments:{softwareId:'12'}});
+  await f.client.callTool({name:'get_ict_notices',arguments:{kind:'maintenance',page:2}});
+  await f.client.callTool({name:'get_exam_planning_overview',arguments:{from:'2026-10-01T00:00:00Z',to:'2026-10-02T00:00:00Z'}});
+  assert.deepEqual(calls,[['editor',25],['12'],['maintenance',2],['2026-10-01T00:00:00Z','2026-10-02T00:00:00Z']]);
+  assert.equal((await f.client.callTool({name:'get_software',arguments:{softwareId:'../../private'}})).isError,true);
+  assert.equal((await f.client.callTool({name:'get_exam_planning_overview',arguments:{from:'tomorrow',to:'next week'}})).isError,true);
+ } finally { await f.close(); }
 });

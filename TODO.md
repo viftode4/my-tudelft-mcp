@@ -1,9 +1,46 @@
 # Student-service TODOs
 
-Research date: 16 September 2026. These are proposed integrations, not available
-MCP tools. A public website establishes a service's existence, not API access or
+Research date: 16 September 2026. Checked items below have implemented coverage;
+unchecked items remain partial or proposed. A public website establishes a service's existence, not API access or
 permission to automate its authenticated actions. Priorities below are product
 judgments based on common student tasks.
+
+## Implementation order: most to least important
+
+1. Exam-registration information and timetable clashes (on-demand overview available; reminders pending).
+2. Ans assessment dates, published results and permitted feedback.
+3. Queue lab sessions, own queue position and previewed join/leave actions.
+4. MyStudyPlanning programme selection and approval status.
+5. Campus Print document submission and queue.
+6. Print balance and requested payment-page handoff.
+7. University email access (institutional policy blocker).
+8. Lecture captions and transcripts.
+9. Library literature search and licensed-access discovery.
+10. TU Delft Repository search.
+11. Academic administration and re-enrolment guidance.
+12. ICT outages and planned maintenance (implemented).
+13. SoftwareFinder search and guidance (implemented).
+14. Study-space discovery (catalogue search available; hours/reservations pending).
+15. Teaching-room lookup (implemented).
+16. ICT help, VPN and eduroam guidance.
+17. X activities and reservations.
+
+Work on lower-priority public readers can proceed while a higher-priority provider
+requires sign-in or institutional approval. Priority does not imply access exists.
+
+## Assessment and lab services
+
+- [ ] **Ans: student assessment overview and published feedback.** Discover courses,
+  assessment dates and the student's released results/review material. Respect
+  publication windows. Do not start, answer or submit a graded test attempt, or
+  fetch material that has not been released to the student. The school-login page
+  lists TU Delft, but authenticated student routes remain unverified.
+  [Ans login](https://ans.app/users/sign_in) and [TU Delft's use of Ans](https://www.ans.app/tu-delft).
+- [ ] **Queue: teaching-assistant requests.** Read own enrolled courses, open labs,
+  assignments and own queue state; add explicit previews for joining/leaving or
+  editing a request. Never queue automatically, duplicate a request after a timeout,
+  or expose other students' details. Silent SSO currently reaches a password prompt;
+  authenticated inspection is pending. [Official Queue](https://queue.tudelft.nl/).
 
 ## First: finish important existing workflows
 
@@ -31,7 +68,10 @@ judgments based on common student tasks.
   official course/exam opportunities, own registrations and MyTimetable reads.
   Report registration windows and clashes with source dates and coverage. Any
   background reminder mechanism needs explicit configuration; the stdio server is
-  not an always-running notification service. See [existing tools](README.md#tools).
+  not an always-running notification service. `get_exam_planning_overview` now
+  reads current official exam registrations and open exam courses, with timed
+  conflicts from the connected timetable. It does not infer missing registrations
+  or send reminders. See [existing tools](README.md#tools).
 
 ## Academic planning and research
 
@@ -60,16 +100,18 @@ judgments based on common student tasks.
 - [ ] **Spacefinder: study spaces and buildings.** Search by building and published
   facilities, with opening hours where supplied. First verify the underlying data
   routes. Do not present a listed space as currently free or bookable without live
-  availability evidence. [Spacefinder](https://spacefinder.tudelft.nl/en/spaces/).
-- [ ] **Teaching-room lookup.** Resolve timetable room names to building, capacity
+  availability evidence. `search_study_spaces` now searches the published catalogue
+  snapshot, including buildings and facilities. Opening hours and reservations
+  remain pending. [Spacefinder](https://spacefinder.tudelft.nl/en/spaces/).
+- [x] **Teaching-room lookup.** Resolve timetable room names to building, capacity
   and published facilities. Preserve ambiguous matches and distinguish room
   specifications from availability. [Education Spaces Viewer](https://esviewer.tudelft.nl/).
-- [ ] **SoftwareFinder: software and installation guidance.** Search software by
-  purpose, platform and audience; read official instructions and access conditions.
+- [x] **SoftwareFinder: software and installation guidance.** Search published
+  names, descriptions and cloud advice; read official instructions and access conditions.
   A listing does not establish a particular student's licence entitlement. Downloads,
   licence acceptance and installation need their own explicit workflow.
   [SoftwareFinder](https://softwarefinder.tudelft.nl/).
-- [ ] **ICT outages and planned maintenance.** Read service notices with timestamps
+- [x] **ICT outages and planned maintenance.** Read service notices with timestamps
   and affected systems so authentication problems can be distinguished from an
   outage. Verify the dynamic feed; an empty HTML shell must never mean all systems
   are healthy. [ICT service information](https://meldingen-ict.tudelft.nl/en/).

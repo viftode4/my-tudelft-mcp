@@ -83,6 +83,10 @@ no provider adapter or MCP tools yet, and cannot submit print jobs or add credit
 
 | Area | Tools | Behavior |
 | --- | --- | --- |
+| Exam planning | `get_exam_planning_overview` | Current OSIRIS exam lists and timed MyTimetable clashes; on-demand, no background reminders |
+| Campus spaces | `search_study_spaces`, `search_teaching_rooms` | Public catalogue and room specifications; no live occupancy or reservations |
+| Software | `search_software`, `get_software` | Public software catalogue, guidance and terms; no licence entitlement or installation claim |
+| ICT notices | `get_ict_notices` | Public incidents, maintenance and information with source dates and pagination |
 | Login | `begin_login`, `get_login_status`, `check_auth`, `logout` | Browser login and saved-session checks |
 | Courses | `list_courses`, `get_course_content`, `get_course_tools` | Own memberships, outlines and navigation |
 | Public Study Guide | `search_study_guide`, `get_study_guide` | Anonymous search and exact code/year information |
@@ -111,7 +115,7 @@ no provider adapter or MCP tools yet, and cannot submit print jobs or add credit
 | File submissions | `prepare_assignment_submission`, `confirm_assignment_submission` | Exact file previews and confirmed submission |
 | Text submissions | `prepare_text_submission`, `confirm_text_submission` | Literal-text previews and confirmed submission |
 
-The server exposes 78 tools. The `brightspace://usage` resource describes workflows; `course_briefing` supplies a sourced briefing template. Rebuild and reconnect the MCP client after updating so it discovers new tools.
+The server exposes 84 tools. The `brightspace://usage` resource describes workflows; `course_briefing` supplies a sourced briefing template. Rebuild and reconnect the MCP client after updating so it discovers new tools.
 
 ## Reading and search
 

@@ -4,15 +4,34 @@ This document describes source-level verification and its limits. Private accoun
 
 ## Automated checks
 
+### Exam planning and public campus readers
+
+Six new tools add an on-demand exam-planning overview, SoftwareFinder search/detail,
+Spacefinder catalogue search, teaching-room search and ICT notices. The official
+public sites were read live with anonymous GET requests: software search/detail,
+room search, both pages of a study-space query, incidents and maintenance. No
+browser or university credentials are used for these public readers.
+
+A read-only live exam overview used the existing account-bound OSIRIS and timetable
+connections and returned complete current lists and timed conflict pairs. It did
+not register for an exam, create reminders or change the timetable. Public readers
+have synthetic format, route, response-size and pagination checks; the overview
+has synthetic conflict, partial-failure, account-switch and bounded-pagination
+checks. MCP schema/annotation coverage includes all six tools.
+
+Ans and Queue are researched but not integrated. Queue's silent SSO reached a
+password prompt. Ans's authenticated student routes remain unverified. Campus
+Print still has only the separate local foundation described below.
+
 The current source passed on Windows with Node 25 and PowerShell 7:
 
 | Check | Result |
 | --- | --- |
 | `npm run check` | Passed |
-| `npm test` | 519 passed, 0 failed, 0 skipped |
+| `npm test` | 539 passed, 0 failed, 0 skipped |
 | `npm run build` | Passed |
 | `npm audit` | No known vulnerabilities at the recorded check |
-| MCP interface | 78 tools; startup/shutdown and structured JSON-RPC output covered; compiled timetable worker and tool discovery smoke passed |
+| MCP interface | 84 tools; startup/shutdown and structured JSON-RPC output covered; compiled timetable worker and tool discovery smoke passed |
 
 Dependencies and service behavior can change. Run these checks in the current checkout rather than treating this table as a permanent guarantee.
 
@@ -22,7 +41,7 @@ The local `PrintActions` foundation has 15 synthetic tests covering file hashes,
 explicit settings, account/quote changes, one-use and expired previews, concurrent
 confirmation, cancellation and uncertain outcomes. Focused coverage is 100% of
 lines and 97.5% of branches. The full 519-test suite, typecheck, build and
-credential-free MCP smoke passed on Windows. The tool count remains 78.
+credential-free MCP smoke passed on Windows. That foundation added no MCP tools.
 
 This proves local approval behavior with a fake transport only. There is no Campus
 Print provider adapter, authenticated queue verification, payment integration or
