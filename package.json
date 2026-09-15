@@ -34,10 +34,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/viftode4/tudelft-brightspace-mcp.git"
+    "url": "git+https://github.com/viftode4/my-tudelft-mcp.git"
   },
-  "homepage": "https://github.com/viftode4/tudelft-brightspace-mcp#readme",
+  "homepage": "https://github.com/viftode4/my-tudelft-mcp#readme",
   "bugs": {
-    "url": "https://github.com/viftode4/tudelft-brightspace-mcp/issues"
+    "url": "https://github.com/viftode4/my-tudelft-mcp/issues"
   }
 }

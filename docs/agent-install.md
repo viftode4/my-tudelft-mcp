@@ -19,8 +19,8 @@ runtimes/settings. Use the user's chosen directory, not another machine's path.
 For a new checkout, run each command in order and check its exit status:
 
 ```sh
-git clone https://github.com/viftode4/tudelft-brightspace-mcp.git
-cd tudelft-brightspace-mcp
+git clone https://github.com/viftode4/my-tudelft-mcp.git
+cd my-tudelft-mcp
 npm ci
 npx playwright install chromium
 npm run build

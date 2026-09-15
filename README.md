@@ -1,4 +1,4 @@
-# TU Delft Brightspace MCP
+# My TU Delft MCP
 
 A local MCP server for everyday TU Delft coursework. Connect it to Codex or another MCP client, sign in through the normal university browser, then use course tools through your agent.
 
@@ -13,8 +13,8 @@ Requires Node.js 22.13 or later with built-in SQLite support, npm, and a graphic
 Clone this repository, then install from the checkout:
 
 ```sh
-git clone https://github.com/viftode4/tudelft-brightspace-mcp.git
-cd tudelft-brightspace-mcp
+git clone https://github.com/viftode4/my-tudelft-mcp.git
+cd my-tudelft-mcp
 npm ci
 npx playwright install chromium
 npm run build
@@ -37,7 +37,7 @@ For a clean attempt, use `begin_login` with `fresh: true`, or `npm run login -- 
 Replace the placeholder with your checkout's absolute path:
 
 ```sh
-codex mcp add tudelft-brightspace -- node /absolute/path/to/tudelft-brightspace-mcp/dist/cli.js serve
+codex mcp add tudelft-brightspace -- node /absolute/path/to/my-tudelft-mcp/dist/cli.js serve
 ```
 
 On Windows, use the full Windows path to the same entrypoint. Start a new Codex conversation after adding the server. For longer operations, configure suitable timeouts:
@@ -45,7 +45,7 @@ On Windows, use the full Windows path to the same entrypoint. Start a new Codex 
 ```toml
 [mcp_servers.tudelft-brightspace]
 command = "node"
-args = ["/absolute/path/to/tudelft-brightspace-mcp/dist/cli.js", "serve"]
+args = ["/absolute/path/to/my-tudelft-mcp/dist/cli.js", "serve"]
 startup_timeout_sec = 20
 tool_timeout_sec = 180
 ```

@@ -3,7 +3,7 @@
     "tudelft-brightspace": {
       "command": "node",
       "args": [
-        "/absolute/path/to/tudelft-brightspace-mcp/dist/cli.js",
+        "/absolute/path/to/my-tudelft-mcp/dist/cli.js",
         "serve"
       ]
     }
