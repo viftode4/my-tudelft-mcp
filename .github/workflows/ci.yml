@@ -7,9 +7,9 @@ on:
 permissions:
   contents: read
 
-# A branch push and its pull request both trigger this workflow, and a new push
-# supersedes the previous one. Without this, six matrix jobs per run pile up on
-# the shared runners and later runs wait on work nobody is going to read.
+# A branch push and its pull request both trigger this workflow, so every push to
+# a pull request branch starts twelve matrix jobs, and a new push leaves the
+# previous run's jobs running for a commit nobody will read. Cancel them.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true

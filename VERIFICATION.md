@@ -31,8 +31,9 @@ loader is now registered inside the worker, and CI runs the matrix on both
 Node 22.16 and Node 24 so the documented floor is actually tested.
 
 CI also gained a concurrency group. A branch push and its pull request both
-trigger the workflow, and with six matrix jobs per run the superseded runs kept
-occupying shared runners; new runs now cancel them.
+trigger the workflow, so each push to a pull request branch started twelve
+matrix jobs and left the previous push's jobs running for a commit nobody would
+read. New runs now cancel the superseded ones.
 
 Running that matrix showed the declared floor was wrong in a second way.
 `package.json` required Node >= 22.13, but Node's bundled SQLite did not include
