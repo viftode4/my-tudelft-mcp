@@ -1,4 +1,5 @@
-import { chromium, type APIRequestContext, type Browser, type BrowserContext, type Page } from 'playwright';
+import { type APIRequestContext, type Browser, type BrowserContext, type Page } from 'playwright';
+import { runLoginFlow } from './login-flow.js';
 import type { Config } from './config.js';
 import { BrightspaceError } from './errors.js';
 import { Vault } from './vault.js';
@@ -149,59 +150,20 @@ export class Auth {
     if (silent && (fresh || service !== 'brightspace' || !previous?.identity || previous.origin !== this.config.baseUrl)) {
       throw new BrightspaceError('AUTH_REQUIRED', 'Connect and verify Brightspace before automatic SSO reconnection.');
     }
-    const browser = await chromium.launch({ headless: silent, channel: this.config.browserChannel });
-    this.loginBrowser = browser;
-    try {
-      if (this.cancelLogin) throw new BrightspaceError('LOGIN_CANCELLED', 'Login was cancelled. Run login again when ready.');
-      const shared = this.config.baseUrl === 'https://brightspace.tudelft.nl' && previous?.origin === this.config.baseUrl && previous.identity
-        ? await this.sso(previous.identity.id) : undefined;
-      const storageState = !fresh && previous?.origin === this.config.baseUrl ? structuredClone(previous.storage) : undefined;
-      if (storageState && shared) storageState.cookies = [...storageState.cookies.filter(cookie => !isSsoCookie(cookie)), ...shared.cookies];
-      this.assertLoginActive();
-      if (silent && !shared?.cookies.length) throw new BrightspaceError('AUTH_REQUIRED', 'The university SSO session needs sign-in. Run begin_login.');
-      const context = await browser.newContext({
-        storageState,
-        locale: 'en-GB', timezoneId: 'Europe/Amsterdam',
-      });
-      const page = await context.newPage();
-      let captured: string | undefined;
-      context.on('request', (req) => {
-        const url = new URL(req.url());
-        if (url.origin !== this.config.baseUrl || !url.pathname.startsWith('/d2l/')) return;
-        const authorization = req.headers().authorization;
-        if (authorization?.startsWith('Bearer ')) captured = authorization.slice(7);
-      });
-      await page.goto(service === 'catalog' ? this.config.catalogUrl : `${this.config.baseUrl}/d2l/home`, { waitUntil: 'domcontentloaded', timeout: silent ? 25_000 : 60_000 });
-      const deadline = Date.now() + (silent ? 25_000 : 10 * 60_000);
-      let connected: 'brightspace' | 'catalog' | undefined;
-      while (Date.now() < deadline) {
-        if (this.cancelLogin || page.isClosed()) throw new BrightspaceError('LOGIN_CANCELLED', 'The login window was closed. The previous saved session was kept.');
-        const location = new URL(page.url());
-        if (location.origin === 'https://engine.surfconext.nl' && location.pathname === '/authentication/sp/consume-assertion') {
-          // The normal assertion callback may navigate while this read-only observation runs.
-          const text = await page.evaluate(() => (document.body?.innerText ?? '').slice(0, 40_000)).catch(() => undefined);
-          this.assertLoginActive(page);
-          if (typeof text === 'string' && isUnsupportedSurfLogin(page.url(), text)) {
-            throw new BrightspaceError('LOGIN_UNSOLICITED', 'SURF rejected an unsupported IdP-initiated login. Close this window and retry a fresh login starting from Brightspace. The previous saved session was kept.');
-          }
-        }
-        if (isBrightspaceHome(page.url(), this.config.baseUrl) && await hasBrightspaceSession(context, this.config)) {
-          connected = 'brightspace'; break;
-        }
-        if (service === 'catalog' && await hasCatalogSession(page, this.config)) { connected = 'catalog'; break; }
-        if (silent && await page.locator('input[type="password"]').first().isVisible().catch(() => false)) {
-          throw new BrightspaceError('AUTH_REQUIRED', 'The university requires sign-in or MFA. Run begin_login once to refresh shared SSO.');
-        }
-        await page.waitForTimeout(750);
-      }
-      if (!connected) throw new BrightspaceError('LOGIN_TIMEOUT', 'Login timed out. Run login again when ready.');
+    const shared = this.config.baseUrl === 'https://brightspace.tudelft.nl' && previous?.origin === this.config.baseUrl && previous.identity
+      ? await this.sso(previous.identity.id) : undefined;
+    const storageState = !fresh && previous?.origin === this.config.baseUrl ? structuredClone(previous.storage) : undefined;
+    if (storageState && shared) storageState.cookies = [...storageState.cookies.filter(cookie => !isSsoCookie(cookie)), ...shared.cookies];
+    if (silent && !shared?.cookies.length) throw new BrightspaceError('AUTH_REQUIRED', 'The university SSO session needs sign-in. Run begin_login.');
+
+    let captured: string | undefined;
+    const finish = async (page: Page, context: BrowserContext, connected: 'brightspace' | 'catalog'): Promise<LoginStatus> => {
       if (connected === 'catalog') {
         if (fresh) throw new BrightspaceError('LOGIN_UNVERIFIED', 'A fresh login must verify the Brightspace account before saving. Start a fresh Brightspace login first. The previous saved session was kept.');
         const storage = await context.storageState();
         this.assertLoginActive(page);
         await this.vault.save({ ...previous!, storage, savedAt: new Date().toISOString() }, expectedFingerprint, () => this.assertLoginActive(page));
-        this.status = { state: 'connected', message: 'TU Delft catalog session saved.' };
-        return;
+        return { state: 'connected', message: 'TU Delft catalog session saved.' };
       }
       this.assertLoginActive(page);
       await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => undefined);
@@ -244,11 +206,47 @@ export class Auth {
         const updated = shared?.accountId === identity.id ? shared : await this.sso(identity.id);
         await updated.save(storage.cookies, () => this.assertLoginActive(page));
       }
-      this.failedSilentAt = 0;
-      this.status = identity
+      return identity
         ? { state: 'connected', message: service === 'catalog' ? 'The catalog redirected to Brightspace. Brightspace login and API access verified.' : 'Brightspace login and API access verified.' }
         : { state: 'connected', message: 'Browser session saved. API access is unavailable; browser retrieval can be tested.' };
-    } finally { await browser.close().catch(() => undefined); this.loginBrowser = undefined; }
+    };
+    this.status = await runLoginFlow<LoginStatus>({
+      silent, channel: this.config.browserChannel, storageState,
+      contextOptions: { locale: 'en-GB', timezoneId: 'Europe/Amsterdam' },
+      errors: {
+        cancelled: { code: 'LOGIN_CANCELLED', message: 'The login window was closed. The previous saved session was kept.' },
+        timeout: { code: 'LOGIN_TIMEOUT', message: 'Login timed out. Run login again when ready.' },
+        authRequired: { code: 'AUTH_REQUIRED', message: 'The university requires sign-in or MFA. Run begin_login once to refresh shared SSO.' },
+      },
+      onBrowser: browser => { this.loginBrowser = browser; },
+      check: async () => this.assertLoginActive(),
+      prepare: async (context) => {
+        context.on('request', (req) => {
+          const url = new URL(req.url());
+          if (url.origin !== this.config.baseUrl || !url.pathname.startsWith('/d2l/')) return;
+          const authorization = req.headers().authorization;
+          if (authorization?.startsWith('Bearer ')) captured = authorization.slice(7);
+        });
+      },
+      start: async (page) => {
+        await page.goto(service === 'catalog' ? this.config.catalogUrl : `${this.config.baseUrl}/d2l/home`, { waitUntil: 'domcontentloaded', timeout: silent ? 25_000 : 60_000 });
+      },
+      probe: async (page, context) => {
+        const location = new URL(page.url());
+        if (location.origin === 'https://engine.surfconext.nl' && location.pathname === '/authentication/sp/consume-assertion') {
+          // The normal assertion callback may navigate while this read-only observation runs.
+          const text = await page.evaluate(() => (document.body?.innerText ?? '').slice(0, 40_000)).catch(() => undefined);
+          this.assertLoginActive(page);
+          if (typeof text === 'string' && isUnsupportedSurfLogin(page.url(), text)) {
+            throw new BrightspaceError('LOGIN_UNSOLICITED', 'SURF rejected an unsupported IdP-initiated login. Close this window and retry a fresh login starting from Brightspace. The previous saved session was kept.');
+          }
+        }
+        if (isBrightspaceHome(page.url(), this.config.baseUrl) && await hasBrightspaceSession(context, this.config)) return finish(page, context, 'brightspace');
+        if (service === 'catalog' && await hasCatalogSession(page, this.config)) return finish(page, context, 'catalog');
+        return undefined;
+      },
+    });
+    this.failedSilentAt = 0;
   }
 
   async logout(): Promise<void> {

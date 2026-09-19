@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { chromium, type APIResponse, type Browser, type BrowserContext, type Route } from 'playwright';
+import { type APIResponse, type Browser, type BrowserContext, type Route } from 'playwright';
+import { runLoginFlow } from './login-flow.js';
 import { load } from 'cheerio';
 import type { Auth } from './auth.js';
 import type { BrightspaceClient } from './client.js';
@@ -14,7 +15,6 @@ const IDP = 'https://login.tudelft.nl';
 const OIDC_CLIENT = 'collegeramavideoportal.tudelft.nl-1';
 const USER_KEY = 'oidc.user:' + CONNECT + '/:' + OIDC_CLIENT;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
-const LOGIN_MS = 10 * 60_000;
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 
 type Client = Pick<BrightspaceClient, 'config' | 'json' | 'list' | 'sessionIdentity'>;
@@ -337,59 +337,58 @@ export class Collegerama {
     const shared = await this.auth.sso(accountId), cookies = shared.cookies;
     await this.unchanged(accountId, generation);
     if (silent && !cookies.length) throw new BrightspaceError('RECORDING_AUTH_REQUIRED', 'Saved university sign-in cannot renew Collegerama. No login window was opened.');
-    let browser: Browser | undefined;
-    try {
-      browser = await chromium.launch({ headless: silent, channel: this.auth.config.browserChannel }); this.browser = browser;
-      await this.unchanged(accountId, generation);
-      const context = await browser.newContext({ storageState: { cookies, origins: [] }, serviceWorkers: 'block', acceptDownloads: false });
-      await context.routeWebSocket('**/*', socket => socket.close());
-      const guard = await guardRecordingLogin(context, () => this.unchanged(accountId, generation));
-      const page = await context.newPage();
-      await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: this.auth.config.timeoutMs }).catch(error => { if (guard.failure) throw guard.failure; throw error; });
-      const deadline = Date.now() + (silent ? 25_000 : LOGIN_MS);
-      let clicked = false;
-      while (Date.now() < deadline) {
-        await this.unchanged(accountId, generation);
-        if (guard.failure) throw guard.failure;
-        if (page.isClosed()) throw new BrightspaceError('RECORDING_LOGIN_CANCELLED', 'The recording login browser was closed.');
-        if (silent && await page.locator('input[type="password"]').first().isVisible().catch(() => false)) {
-          throw new BrightspaceError('RECORDING_AUTH_REQUIRED', 'Collegerama needs interactive university sign-in. No login window was opened.');
-        }
+    let guard: { failure?: BrightspaceError } = {};
+    const current = async (): Promise<void> => { await this.unchanged(accountId, generation); if (guard.failure) throw guard.failure; };
+    const cancelled = { code: 'RECORDING_LOGIN_CANCELLED', message: 'The recording login browser was closed.' };
+    let clicked = false;
+    await runLoginFlow<true>({
+      silent, channel: this.auth.config.browserChannel, isolate: true,
+      storageState: { cookies, origins: [] },
+      errors: {
+        cancelled,
+        timeout: { code: 'RECORDING_LOGIN_TIMEOUT', message: 'The recording login timed out. Run begin_recording_login again.' },
+        authRequired: { code: 'RECORDING_AUTH_REQUIRED', message: silent
+          ? 'Collegerama could not renew silently. Interactive sign-in or MFA is required; no login window was opened.'
+          : 'Collegerama needs interactive university sign-in.' },
+      },
+      onBrowser: launched => { this.browser = launched; },
+      check: current,
+      prepare: async (context) => { guard = await guardRecordingLogin(context, () => this.unchanged(accountId, generation)); },
+      start: async (page) => {
+        await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: this.auth.config.timeoutMs }).catch(error => { if (guard.failure) throw guard.failure; throw error; });
+      },
+      probe: async (page, context) => {
         const location = new URL(page.url());
-        if (location.origin === PORTAL) {
-          const stored = await page.evaluate(key => localStorage.getItem(key), USER_KEY);
-          if (stored) {
-            let user: Row; try { user = record(JSON.parse(stored)); } catch { throw new BrightspaceError('RECORDING_FORMAT_CHANGED', 'The portal returned an unfamiliar login state.'); }
-            const token = str(user.access_token), expiresAt = Number(user.expires_at) * 1000;
-            if (!token || token.length > 32_000 || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new BrightspaceError('RECORDING_AUTH_REQUIRED', 'The recording login did not provide a valid current session.');
-            const claims = record(await this.providerJson(CONNECT + '/oidc/userinfo', token));
-            const subject = str(claims.sub);
-            if (!subject || str(record(user.profile).sub) !== subject) throw new BrightspaceError('RECORDING_IDENTITY_UNVERIFIED', 'The provider session and verified account identifier did not agree.');
-            const method = matchRecordingIdentity(target.identity, claims);
-            await this.unchanged(accountId, generation);
-            if (page.isClosed()) throw new BrightspaceError('RECORDING_LOGIN_CANCELLED', 'The recording login browser was closed before the account was saved.');
-            await vault.save({ version: 1, brightspaceOrigin: this.auth.config.baseUrl, accountId, providerOrigin: PORTAL, authority: CONNECT,
-              accessToken: token, expiresAt, subjectHash: digest(subject), identityMethod: method, savedAt: new Date().toISOString() }, expected);
-            await this.unchanged(accountId, generation);
-            const storage = await context.storageState();
-            await this.unchanged(accountId, generation);
-            await shared.save(storage.cookies, () => {
-              if (generation !== this.generation || page.isClosed()) throw new BrightspaceError('RECORDING_LOGIN_CANCELLED', 'The recording login was cancelled before saving shared sign-in.');
-            });
-            this.loginState = { state: 'connected', message: 'Collegerama is connected to the verified Brightspace account.', courseId: target.courseId, topicId: target.topicId };
-            return;
-          }
-          if (!clicked) {
-            const signIn = page.getByRole('button', { name: /^(?:sign in|log in|login|inloggen)$/i }).or(page.getByRole('link', { name: /^(?:sign in|log in|login|inloggen)$/i })).filter({ visible: true });
-            if (await signIn.count()) { clicked = true; await signIn.first().click({ timeout: 5000 }); }
-          }
+        if (location.origin !== PORTAL) return undefined;
+        const stored = await page.evaluate(key => localStorage.getItem(key), USER_KEY);
+        if (stored) {
+          let user: Row; try { user = record(JSON.parse(stored)); } catch { throw new BrightspaceError('RECORDING_FORMAT_CHANGED', 'The portal returned an unfamiliar login state.'); }
+          const token = str(user.access_token), expiresAt = Number(user.expires_at) * 1000;
+          if (!token || token.length > 32_000 || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new BrightspaceError('RECORDING_AUTH_REQUIRED', 'The recording login did not provide a valid current session.');
+          const claims = record(await this.providerJson(CONNECT + '/oidc/userinfo', token));
+          const subject = str(claims.sub);
+          if (!subject || str(record(user.profile).sub) !== subject) throw new BrightspaceError('RECORDING_IDENTITY_UNVERIFIED', 'The provider session and verified account identifier did not agree.');
+          const method = matchRecordingIdentity(target.identity, claims);
+          await this.unchanged(accountId, generation);
+          if (page.isClosed()) throw new BrightspaceError('RECORDING_LOGIN_CANCELLED', 'The recording login browser was closed before the account was saved.');
+          await vault.save({ version: 1, brightspaceOrigin: this.auth.config.baseUrl, accountId, providerOrigin: PORTAL, authority: CONNECT,
+            accessToken: token, expiresAt, subjectHash: digest(subject), identityMethod: method, savedAt: new Date().toISOString() }, expected);
+          await this.unchanged(accountId, generation);
+          const storage = await context.storageState();
+          await this.unchanged(accountId, generation);
+          await shared.save(storage.cookies, () => {
+            if (generation !== this.generation || page.isClosed()) throw new BrightspaceError('RECORDING_LOGIN_CANCELLED', 'The recording login was cancelled before saving shared sign-in.');
+          });
+          this.loginState = { state: 'connected', message: 'Collegerama is connected to the verified Brightspace account.', courseId: target.courseId, topicId: target.topicId };
+          return true;
         }
-        await page.waitForTimeout(750);
-      }
-      throw new BrightspaceError(silent ? 'RECORDING_AUTH_REQUIRED' : 'RECORDING_LOGIN_TIMEOUT', silent
-        ? 'Collegerama could not renew silently. Interactive sign-in or MFA is required; no login window was opened.'
-        : 'The recording login timed out. Run begin_recording_login again.');
-    } finally { await browser?.close().catch(() => undefined); if (this.browser === browser) this.browser = undefined; }
+        if (!clicked) {
+          const signIn = page.getByRole('button', { name: /^(?:sign in|log in|login|inloggen)$/i }).or(page.getByRole('link', { name: /^(?:sign in|log in|login|inloggen)$/i })).filter({ visible: true });
+          if (await signIn.count()) { clicked = true; await signIn.first().click({ timeout: 5000 }); }
+        }
+        return undefined;
+      },
+    });
   }
 
   async read(courseId: string, topicId: string, options: { offset?: number; maxChars?: number } = {}): Promise<Row> {

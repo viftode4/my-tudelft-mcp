@@ -16,13 +16,14 @@ Clone this repository, then install from the checkout:
 git clone https://github.com/viftode4/my-tudelft-mcp.git
 cd my-tudelft-mcp
 npm ci
-npx playwright install chromium
 npm run build
 npm run login
 npm run doctor
 ```
 
-Complete TU Delft sign-in and MFA in the opened browser. Passwords and MFA codes belong there, never in agent messages or tool arguments. `doctor` verifies the saved session without printing credentials.
+If Google Chrome or Microsoft Edge is installed, the connector uses it and nothing is downloaded. Without either, run `npx playwright install chromium` once (about 300 MB), or set `BRIGHTSPACE_BROWSER_CHANNEL` to any Playwright channel name.
+
+`npm run login` is the one sign-in. It opens Brightspace in a window; complete TU Delft sign-in and MFA there. Passwords and MFA codes belong there, never in agent messages or tool arguments. In the same run it then connects My TU Delft (OSIRIS) through the shared university SSO and reads your personal MyTimetable calendar link from the MyTimetable site, both silently unless the university asks for sign-in again. `npm run login -- --only brightspace` limits it to Brightspace; `--only mytu,timetable` skips the Brightspace window when it is already connected. Lecture recordings (per course) and university email (Microsoft) have their own logins, described below. `doctor` verifies the saved session without printing credentials.
 
 Brightspace, My TU Delft and Collegerama share an account-bound TU Delft/SURF SSO cookie store. After a service verifies the linked account, it saves refreshed SSO cookies for subsequent service connections. Windows protects this state with DPAPI. Service cookies and tokens remain separate; the connector does not import your everyday browser profile.
 
@@ -105,7 +106,7 @@ no provider adapter or MCP tools yet, and cannot submit print jobs or add credit
 | Group enrollment | `list_available_groups`, `prepare_group_enrollment`, `confirm_group_enrollment` | Native group discovery and previewed joining |
 | Linked services | `read_course_service` | Verified Study Guide continuation; GSE access remains pending |
 | Calendar and quizzes | `get_calendar`, `get_upcoming_deadlines`, `get_study_overview`, `list_quizzes` | Sourced dates and course overview |
-| Personal timetable | `connect_timetable`, `get_timetable_status`, `get_timetable`, `disconnect_timetable` | Calendar subscription reader with Delft times, rooms, recurrence changes and cancellations; authorized personal connection and live reads verified |
+| Personal timetable | `connect_timetable_from_browser`, `connect_timetable`, `get_timetable_status`, `get_timetable`, `disconnect_timetable` | Calendar subscription reader with Delft times, rooms, recurrence changes and cancellations; authorized personal connection and live reads verified |
 | Lectures | `read_material`, `download_material` | Bounded extraction and optional downloads |
 | Recording discovery | `list_recordings` | Recording/caption links with provenance |
 | Collegerama | `begin_recording_login`, `get_recording_login_status`, `read_recording` | Separate login and metadata; live provider compatibility unverified |
@@ -115,7 +116,7 @@ no provider adapter or MCP tools yet, and cannot submit print jobs or add credit
 | File submissions | `prepare_assignment_submission`, `confirm_assignment_submission` | Exact file previews and confirmed submission |
 | Text submissions | `prepare_text_submission`, `confirm_text_submission` | Literal-text previews and confirmed submission |
 
-The server exposes 84 tools. The `brightspace://usage` resource describes workflows; `course_briefing` supplies a sourced briefing template. Rebuild and reconnect the MCP client after updating so it discovers new tools.
+The server exposes 85 tools. The `brightspace://usage` resource describes workflows; `course_briefing` supplies a sourced briefing template. Rebuild and reconnect the MCP client after updating so it discovers new tools.
 
 ## Reading and search
 
@@ -137,7 +138,7 @@ Sync cannot infer deletion from partial listings. Removed items can remain cache
 
 Open [MyTimetable](https://mytimetable.tudelft.nl/schedule), sign in, and select the courses and groups that belong in your personal schedule. Use **Connect calendar** to obtain the personal iCalendar subscription URL. **Download iCalendar** produces a static export; use the subscription for updates. See the [university's instructions](https://mytimetable.tudelft.nl/help).
 
-An agent with browser access can retrieve this link for the student after an authorized MyTimetable sign-in. The mobile site's **Main menu → Connect to calendar app** exposes the subscription directly. Transfer it locally to `connect_timetable`; the student does not need to copy it into chat. A saved Brightspace session does not guarantee MyTimetable SSO remains valid, so the university may require a fresh interactive login. Passwords and MFA stay in that window.
+`npm run login` reads this link for you. From an MCP client, `connect_timetable_from_browser` (with `interactive: true`, only when the student asks) does the same: it opens the MyTimetable mobile site with the shared TU Delft SSO, follows **Main menu → Connect to calendar app** and saves the link locally without ever returning it. The manual path below still works if you prefer to hand over the link yourself. A saved Brightspace session does not guarantee MyTimetable SSO remains valid, so the university may require a fresh interactive login. Passwords and MFA stay in that window.
 
 After a Brightspace login and build, connect the URL using `connect_timetable`. Treat the URL as a private credential. On Windows, copy it yourself and run this helper to transfer it locally without putting it in a chat transcript, command-line argument or plaintext file:
 
@@ -238,7 +239,7 @@ To remove all connector data, stop its process and remove only its runtime data 
 | `BRIGHTSPACE_URL` | `https://brightspace.tudelft.nl` | Brightspace HTTPS origin |
 | `BRIGHTSPACE_CATALOG_URL` | `https://brightspace-cc.tudelft.nl` | Legacy catalog fallback |
 | `BRIGHTSPACE_DATA_DIR` | Project `.local` | Session, index and download directory |
-| `BRIGHTSPACE_BROWSER_CHANNEL` | Bundled Chromium | Optional installed browser channel |
+| `BRIGHTSPACE_BROWSER_CHANNEL` | Installed Chrome or Edge if found, else bundled Chromium | Playwright channel name, or `bundled` to force the Playwright download |
 
 ## Scope and development
 

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { chromium, type APIResponse, type Browser, type BrowserContext, type Route } from 'playwright';
+import { type APIResponse, type Browser, type BrowserContext, type Route } from 'playwright';
+import { runLoginFlow } from './login-flow.js';
 import type { Auth, BrowserState } from './auth.js';
 import type { BrightspaceClient } from './client.js';
 import { BrightspaceError, safeError } from './errors.js';
@@ -15,7 +16,6 @@ const ENGINE = 'https://engine.surfconext.nl';
 const IDP = 'https://login.tudelft.nl';
 const ACS = '/osirissaml/saml2/acs/osiris-student';
 const MAX_BYTES = 2 * 1024 * 1024;
-const LOGIN_MS = 10 * 60_000;
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 type Client = Pick<BrightspaceClient, 'config' | 'json' | 'sessionIdentity'>;
 export interface MyTuAccess {
@@ -290,7 +290,6 @@ export class MyTuDelft {
   }
   private async login(expected: MyTuIdentity, generation: number, confirmedStudentNumber?: string, silent = false): Promise<void> {
     const vault = this.vault(expected.accountId), fingerprint = await vault.fingerprint();
-    let browser: Browser | undefined;
     try {
       await this.active(expected.accountId, generation);
       const previous = await vault.load();
@@ -322,71 +321,77 @@ export class MyTuDelft {
       await this.active(expected.accountId, generation);
       const interactiveRequired = () => new BrightspaceError('MYTU_AUTH_REQUIRED', 'The university SSO session requires sign-in or MFA. Run begin_mytu_login once; refreshed SSO will be saved for later connections.');
       if (silent && !cookies.length && !canRefresh) throw interactiveRequired();
-      browser = await chromium.launch({ headless: silent, channel: this.auth.config.browserChannel }); this.browser = browser;
-      await this.active(expected.accountId, generation);
-      const context = await browser.newContext({ storageState: { cookies: [...cookies, ...serviceCookies], origins: [] }, serviceWorkers: 'block', acceptDownloads: false });
-      await context.routeWebSocket('**/*', socket => socket.close());
       let candidate: Token | undefined;
-      const guard = await guardMyTuLogin(context, () => this.active(expected.accountId, generation), async (url, response) => {
-        if (url.origin === ORIGIN && url.pathname === API + '/token' && response.status() === 200) {
-          if (!(response.headers()['content-type'] ?? '').includes('json')) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft token response was not JSON.');
-          const bytes = await response.body();
-          if (bytes.length > 64_000) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft token response exceeded its read limit.');
-          let data: unknown; try { data = JSON.parse(bytes.toString('utf8')); } catch { throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft token response could not be read.'); }
-          candidate = tokenFrom(data);
-        }
-      });
-      const page = await context.newPage();
+      let guard: { failure?: BrightspaceError } = {};
       const current = async (): Promise<void> => {
         await this.active(expected.accountId, generation);
         if (guard.failure) throw guard.failure;
-        if (page.isClosed()) throw new BrightspaceError('MYTU_LOGIN_CANCELLED', 'The My TU Delft login browser was closed.');
       };
-      if (silent && canRefresh) {
-        await current();
-        const response = await context.request.post(ORIGIN + API + '/token', {
-          data: {}, headers: { accept: 'application/json' }, maxRedirects: 0, maxRetries: 0, timeout: this.auth.config.timeoutMs,
-        });
-        try {
-          await current();
-          if (response.status() === 200 && (response.headers()['content-type'] ?? '').includes('json')) {
-            const bytes = await response.body();
-            if (bytes.length > 64_000) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft refresh response exceeded its read limit.');
-            let body: unknown; try { body = JSON.parse(bytes.toString('utf8')); } catch { throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft refresh response could not be read.'); }
-            candidate = tokenFrom(body);
+      const cancelled = { code: 'MYTU_LOGIN_CANCELLED', message: 'The My TU Delft login browser was closed.' };
+      const authRequired = interactiveRequired();
+      await runLoginFlow<true>({
+        silent, channel: this.auth.config.browserChannel, isolate: true,
+        storageState: { cookies: [...cookies, ...serviceCookies], origins: [] },
+        errors: {
+          cancelled, authRequired: { code: authRequired.code, message: authRequired.message },
+          timeout: { code: 'MYTU_LOGIN_TIMEOUT', message: 'The My TU Delft login timed out. Run begin_mytu_login again.' },
+        },
+        onBrowser: launched => { this.browser = launched; },
+        check: current,
+        prepare: async (context) => {
+          guard = await guardMyTuLogin(context, () => this.active(expected.accountId, generation), async (url, response) => {
+            if (url.origin === ORIGIN && url.pathname === API + '/token' && response.status() === 200) {
+              if (!(response.headers()['content-type'] ?? '').includes('json')) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft token response was not JSON.');
+              const bytes = await response.body();
+              if (bytes.length > 64_000) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft token response exceeded its read limit.');
+              let data: unknown; try { data = JSON.parse(bytes.toString('utf8')); } catch { throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft token response could not be read.'); }
+              candidate = tokenFrom(data);
+            }
+          });
+        },
+        start: async (page, context) => {
+          if (silent && canRefresh) {
+            await current();
+            const response = await context.request.post(ORIGIN + API + '/token', {
+              data: {}, headers: { accept: 'application/json' }, maxRedirects: 0, maxRetries: 0, timeout: this.auth.config.timeoutMs,
+            });
+            try {
+              await current();
+              if (response.status() === 200 && (response.headers()['content-type'] ?? '').includes('json')) {
+                const bytes = await response.body();
+                if (bytes.length > 64_000) throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft refresh response exceeded its read limit.');
+                let body: unknown; try { body = JSON.parse(bytes.toString('utf8')); } catch { throw new BrightspaceError('MYTU_FORMAT_CHANGED', 'The My TU Delft refresh response could not be read.'); }
+                candidate = tokenFrom(body);
+              }
+            } finally { await response.dispose(); }
           }
-        } finally { await response.dispose(); }
-      }
-      if (!candidate) await page.goto(ORIGIN + '/', { waitUntil: 'domcontentloaded', timeout: this.auth.config.timeoutMs });
-      const deadline = Date.now() + (silent ? 25_000 : LOGIN_MS);
-      while (Date.now() < deadline) {
-        await current();
-        if (candidate) {
+          if (!candidate) await page.goto(ORIGIN + '/', { waitUntil: 'domcontentloaded', timeout: this.auth.config.timeoutMs });
+        },
+        probe: async (page, context) => {
+          if (!candidate) return undefined;
           const token = candidate;
-          const verified = await this.providerIdentity(expected, token.accessToken, current, confirmedStudentHash);
-          await current();
+          const stillOpen = async (): Promise<void> => { await current(); if (page.isClosed()) throw new BrightspaceError(cancelled.code, cancelled.message); };
+          const verified = await this.providerIdentity(expected, token.accessToken, stillOpen, confirmedStudentHash);
+          await stillOpen();
           const storage = await context.storageState();
-          await current();
+          await stillOpen();
           await vault.save({ version: 1, brightspaceOrigin: this.auth.config.baseUrl, accountId: expected.accountId, providerOrigin: ORIGIN,
             ...token, providerCookies: providerCookies(storage.cookies), studentHash: verified.studentHash, identityMethod: verified.method, savedAt: new Date().toISOString() }, fingerprint, () => {
             if (generation !== this.generation || page.isClosed()) throw new BrightspaceError('MYTU_LOGIN_CANCELLED', 'The My TU Delft login was cancelled before saving.');
           });
-          await current();
+          await stillOpen();
           await shared.save(storage.cookies, () => {
             if (generation !== this.generation || page.isClosed()) throw new BrightspaceError('MYTU_LOGIN_CANCELLED', 'The My TU Delft login was cancelled before saving shared sign-in.');
           });
-          await current(); this.failedRenewal = undefined;
+          await stillOpen(); this.failedRenewal = undefined;
           this.loginState = { state: 'connected', identityMethod: verified.method, message: verified.method === 'student_confirmed_link'
             ? 'My TU Delft is connected to the exact student account you explicitly linked to this Brightspace account.' : verified.method === 'institutional_student_number'
             ? 'My TU Delft is connected and matched to your Brightspace student number.'
-            : 'My TU Delft is connected and matched to your Brightspace institutional email address.' }; return;
-        }
-        if (silent && await page.locator('input[type="password"]').first().isVisible().catch(() => false)) throw interactiveRequired();
-        await page.waitForTimeout(750);
-      }
-      if (silent) throw interactiveRequired();
-      throw new BrightspaceError('MYTU_LOGIN_TIMEOUT', 'The My TU Delft login timed out. Run begin_mytu_login again.');
-    } finally { await browser?.close().catch(() => undefined); if (this.browser === browser) this.browser = undefined; }
+            : 'My TU Delft is connected and matched to your Brightspace institutional email address.' };
+          return true;
+        },
+      });
+    } finally { this.browser = undefined; }
   }
   private async api(path: string, token: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'GET', body?: unknown): Promise<unknown> {
     if (!myTuApiRequestAllowed(path, method, body)) throw new BrightspaceError('MYTU_TARGET_UNVERIFIED', 'This is not an approved own-student endpoint.');
@@ -483,6 +488,8 @@ export class MyTuDelft {
     if (matched.studentHash !== session.studentHash) throw new BrightspaceError('MYTU_ACCOUNT_MISMATCH', 'The saved My TU Delft student identity changed. Reconnect with your current account.');
     await current(); return { session, current, identityMethod: matched.method };
   }
+  /** Resolve once a login started with beginLogin has finished, with its final status. */
+  async waitForLogin(): Promise<MyTuLoginStatus> { await this.starting?.catch(() => undefined); await this.loginTask; return this.status(); }
   async checkAuth(): Promise<Row> {
     const { current, identityMethod } = await this.verified(); await current();
     return { connected: true, provider: 'My TU Delft', accountVerified: true, identityMethod, officialResults: true };
