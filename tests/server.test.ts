@@ -82,7 +82,7 @@ test('MCP exposes student tools with schemas and accurate write annotations', as
   const f = await fixture();
   try {
     const { tools } = await f.client.listTools();
-    assert.equal(tools.length, 85);
+    assert.equal(tools.length, 86);
     assert.equal(new Set(tools.map((tool) => tool.name)).size, tools.length);
     for (const name of ['list_recordings', 'read_course_service', 'list_available_groups', 'prepare_group_enrollment', 'search_study_guide', 'get_study_guide', 'list_group_locker_files', 'read_group_locker_file']) assert.ok(tools.some((tool) => tool.name === name), name);
     for (const name of ['begin_recording_login', 'get_recording_login_status', 'read_recording']) assert.ok(tools.some((tool) => tool.name === name), name);

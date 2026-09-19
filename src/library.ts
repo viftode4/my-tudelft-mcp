@@ -46,7 +46,17 @@ export class Library {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     if (path !== ':memory:') chmodSync(path, 0o600);
-    this.db.exec('PRAGMA journal_mode=WAL; CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(id UNINDEXED, course_id UNINDEXED, kind UNINDEXED, title, url UNINDEXED, body, fetched_at UNINDEXED, tokenize="unicode61");');
+    try {
+      this.db.exec('PRAGMA journal_mode=WAL; CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(id UNINDEXED, course_id UNINDEXED, kind UNINDEXED, title, url UNINDEXED, body, fetched_at UNINDEXED, tokenize="unicode61");');
+    } catch (error) {
+      // Node's bundled SQLite gained the FTS5 extension in 22.16.0. Older 22.x builds fail here with
+      // a bare "no such module: fts5", which says nothing about what the student should do.
+      if (error instanceof Error && /fts5/i.test(error.message)) {
+        throw new BrightspaceError('SQLITE_FTS5_MISSING',
+          `Local course search needs the FTS5 extension, which this Node build's SQLite does not include (running ${process.version}). Upgrade to Node 22.16 or later, or Node 24. Other tools are unaffected.`);
+      }
+      throw error;
+    }
   }
   put(doc: IndexedDocument): void {
     const timestamp = Date.parse(doc.fetchedAt);

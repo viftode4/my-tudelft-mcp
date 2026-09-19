@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { Worker } from 'node:worker_threads';
 import type { BrightspaceClient } from './client.js';
 import type { Config } from './config.js';
 import { BrightspaceError } from './errors.js';
@@ -8,6 +7,7 @@ import { timetableWindow, TIMETABLE_URL, type TimetableCalendar } from './timeta
 import type { Row } from './util.js';
 import type { SsoLease } from './sso.js';
 import { runLoginFlow } from './login-flow.js';
+import { startParsingWorker } from './worker.js';
 
 const TIMETABLE_ORIGIN = 'https://mytimetable.tudelft.nl';
 /** Login connector access: the shared TU/SURF SSO lease for the verified account. */
@@ -26,8 +26,7 @@ export async function calendarInWorker(text: string, from: string, to: string): 
   timetableWindow(from, to);
   const workerUrl = new URL(import.meta.url.endsWith('.ts') ? './timetable-worker.ts' : './timetable-worker.js', import.meta.url);
   return new Promise((resolve, reject) => {
-    const worker = new Worker(workerUrl, { workerData: { text, from, to }, stdout: true, stderr: true,
-      execArgv: workerUrl.pathname.endsWith('.ts') ? ['--import', import.meta.resolve('tsx')] : [],
+    const worker = startParsingWorker(workerUrl, { workerData: { text, from, to }, stdout: true, stderr: true,
       resourceLimits: { maxOldGenerationSizeMb: 128, maxYoungGenerationSizeMb: 16, stackSizeMb: 4 } });
     worker.stdout.resume(); worker.stderr.resume();
     let settled = false;
