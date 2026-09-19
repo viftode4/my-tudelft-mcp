@@ -30,6 +30,10 @@ and seven timetable tests failed on Node 22 while passing on Node 24. The worker
 loader is now registered inside the worker, and CI runs the matrix on both
 Node 22.16 and Node 24 so the documented floor is actually tested.
 
+CI also gained a concurrency group. A branch push and its pull request both
+trigger the workflow, and with six matrix jobs per run the superseded runs kept
+occupying shared runners; new runs now cancel them.
+
 Running that matrix showed the declared floor was wrong in a second way.
 `package.json` required Node >= 22.13, but Node's bundled SQLite did not include
 the FTS5 extension that local course search needs until 22.16.0. Probing official
