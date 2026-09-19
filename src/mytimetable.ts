@@ -6,6 +6,12 @@ import { BrightspaceError } from './errors.js';
 import { Vault } from './vault.js';
 import { timetableWindow, TIMETABLE_URL, type TimetableCalendar } from './timetable-calendar.js';
 import type { Row } from './util.js';
+import type { SsoLease } from './sso.js';
+import { runLoginFlow } from './login-flow.js';
+
+const TIMETABLE_ORIGIN = 'https://mytimetable.tudelft.nl';
+/** Login connector access: the shared TU/SURF SSO lease for the verified account. */
+export interface TimetableSso { sso(accountId: string): Promise<SsoLease>; config: { browserChannel?: string; timeoutMs: number } }
 
 interface SavedFeed { version: 1; accountId: string; origin: string; feedUrl: string; connectedAt: string }
 export function timetableFeedUrl(value: string): string {
@@ -41,8 +47,9 @@ export async function calendarInWorker(text: string, from: string, to: string): 
 export class MyTimetable {
   private generation = 0;
   private currentAccount?: string;
-  constructor(private readonly config: Config, private readonly client: Pick<BrightspaceClient, 'verifyIdentity' | 'sessionIdentity'>) {}
-  close(): void { this.generation++; }
+  private browser?: import('playwright').Browser;
+  constructor(private readonly config: Config, private readonly client: Pick<BrightspaceClient, 'verifyIdentity' | 'sessionIdentity'>, private readonly auth?: TimetableSso) {}
+  close(): void { this.generation++; void this.browser?.close().catch(() => undefined); this.browser = undefined; }
   private vault(accountId: string): Vault<SavedFeed> {
     return new Vault(this.config.dataDir, 'timetable-' + createHash('sha256').update(this.config.baseUrl + ':' + accountId).digest('hex').slice(0, 20));
   }
@@ -79,6 +86,62 @@ export class MyTimetable {
       } finally { await reader.cancel().catch(() => undefined); }
       return Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, '');
     } finally { if (!response.body?.locked) await response.body?.cancel().catch(() => undefined); }
+  }
+  /**
+   * Read the personal subscription link from MyTimetable itself instead of
+   * asking the student to paste it. Opens the mobile site with the shared
+   * TU/SURF SSO cookies, signs in (silently when the SSO session is still
+   * valid), opens Main menu -> Connect to calendar app and reads the link
+   * from the page. The link is saved locally and never returned.
+   */
+  async capture(options: { silent?: boolean } = {}): Promise<Row> {
+    if (!this.auth) throw new BrightspaceError('TIMETABLE_UNAVAILABLE', 'Browser capture is not available in this process. Use connect_timetable with the subscription link.');
+    const silent = options.silent === true;
+    const generation = this.generation, accountId = await this.own();
+    await this.current(accountId, generation);
+    const shared = await this.auth.sso(accountId);
+    if (silent && !shared.cookies.length) throw new BrightspaceError('TIMETABLE_AUTH_REQUIRED', 'Saved university sign-in cannot open MyTimetable silently. Run login once.');
+    const visible = async (locator: import('playwright').Locator): Promise<boolean> => locator.first().isVisible().catch(() => false);
+    let lastClick = 0;
+    const feedUrl = await runLoginFlow<string>({
+      silent, channel: this.auth.config.browserChannel, isolate: true,
+      storageState: { cookies: shared.cookies, origins: [] },
+      silentMs: 40_000,
+      errors: {
+        cancelled: { code: 'TIMETABLE_LOGIN_CANCELLED', message: 'The MyTimetable window was closed before the calendar link was read.' },
+        timeout: { code: 'TIMETABLE_LOGIN_TIMEOUT', message: 'MyTimetable did not finish signing in within the time limit.' },
+        authRequired: { code: 'TIMETABLE_AUTH_REQUIRED', message: 'MyTimetable asks for sign-in or MFA. Run login once to refresh shared SSO.' },
+      },
+      onBrowser: launched => { this.browser = launched; },
+      check: () => this.current(accountId, generation),
+      start: async (page) => { await page.goto(TIMETABLE_ORIGIN + '/m/', { waitUntil: 'domcontentloaded', timeout: this.auth!.config.timeoutMs }); },
+      probe: async (page, context) => {
+        if (new URL(page.url()).origin !== TIMETABLE_ORIGIN) return undefined;
+        const menu = page.getByRole('button', { name: /main menu/i });
+        if (!await visible(menu)) {
+          // Not signed in yet: press the site's own login control, which starts SURF SSO.
+          if (Date.now() - lastClick > 5_000) {
+            const control = page.getByRole('link', { name: /^log ?in$/i }).or(page.getByRole('button', { name: /^log ?in$/i })).filter({ visible: true });
+            if (await control.count()) { lastClick = Date.now(); await control.first().click({ timeout: 5_000 }).catch(() => undefined); }
+          }
+          return undefined;
+        }
+        await menu.first().click({ timeout: 10_000 });
+        const connect = page.getByRole('button', { name: /connect to calendar app/i }).or(page.getByText(/connect to calendar app/i));
+        await connect.first().click({ timeout: 10_000 });
+        const input = page.locator('#export-http-url');
+        await input.waitFor({ state: 'visible', timeout: 15_000 });
+        const value = (await input.inputValue({ timeout: 5_000 })).trim();
+        if (!value) throw new BrightspaceError('TIMETABLE_FORMAT_CHANGED', 'MyTimetable did not show a calendar link on the connect page.');
+        const storage = await context.storageState();
+        await this.current(accountId, generation);
+        // MyTimetable completed SURF SSO: keep the refreshed shared cookies for the other services.
+        await shared.save(storage.cookies, () => { if (generation !== this.generation) throw new BrightspaceError('TIMETABLE_LOGIN_CANCELLED', 'The timetable connection changed before saving shared sign-in.'); });
+        return value;
+      },
+    });
+    const result = await this.connect(feedUrl);
+    return { ...result, feedOwnership: 'student_authorized_browser' };
   }
   async connect(feedUrl: string): Promise<Row> {
     feedUrl = timetableFeedUrl(feedUrl);

@@ -93,7 +93,7 @@ export function createServer(config: Config, auth = new Auth(config)) {
   const textSubmissions = new TextSubmissionActions(service.client, service.browser);
   const mytu = new MyTuDelft(auth, service.client);
   const mytuStudy = new MyTuStudy(mytu);
-  const timetable = new MyTimetable(config, service.client);
+  const timetable = new MyTimetable(config, service.client, auth);
   const mail = new UniversityMail(service.client);
   const examPlanning = new ExamPlanning(mytuStudy, timetable, () => service.client.verifyIdentity());
   const publicCampus = new PublicCampus();
@@ -178,6 +178,8 @@ export function createServer(config: Config, auth = new Auth(config)) {
   add('get_timetable_status', 'Check whether a personal MyTimetable subscription is configured for the current Brightspace account. Does not fetch events or expose the private feed URL.', {}, () => timetable.status());
   add('get_timetable', 'Read live lectures, practicals, exams and other activities from the connected MyTimetable subscription in an explicit timestamp range of at most 93 days. Returns Delft local times, locations, recurring occurrences, changes and cancellations. Coverage is limited to selected courses/groups and published feed contents. Empty output does not establish free time. Combine with get_study_overview for Brightspace deadlines.',
     { from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }) }, a => timetable.events(a.from, a.to));
+  add('connect_timetable_from_browser', 'Read the personal MyTimetable subscription link from the MyTimetable site itself using the saved TU Delft SSO, then save it locally. Nothing is pasted into chat and the link is never returned. Use only after the student explicitly asks to connect their timetable.',
+    interactiveLogin, () => timetable.capture({ silent: false }), write);
   add('disconnect_timetable', 'Remove this account’s locally saved timetable subscription. Does not change selections or revoke the link on MyTimetable.', {}, () => timetable.disconnect(), { ...local, destructiveHint: true });
   add('prepare_official_registration', 'Preview an official OSIRIS course/exam enrollment or withdrawal. Discover targets first. For courses use an exact course-block courseId; examCodes and workingMethods select published optional codes. For exams use the parent courseId and exact opportunity targetId. Withdrawals use the exact registered targetId from list_official_registrations. No registration is sent. Show the full preview and obtain explicit approval before confirming. Payment, admission, group-preference and advanced accommodation flows require the university browser.',
     { kind: registrationKind, action: z.enum(['enroll', 'withdraw']).default('enroll'), courseId: osirisId, targetId: osirisId.optional(), examCodes: z.array(osirisId).max(30).optional(), workingMethods: z.array(osirisId).max(30).optional() }, a => mytuStudy.prepareRegistration(a), { ...read, idempotentHint: false });

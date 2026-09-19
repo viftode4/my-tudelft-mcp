@@ -3,20 +3,62 @@ import { loadConfig } from './config.js';
 import { Auth, discoverVersions } from './auth.js';
 import { BrightspaceClient } from './client.js';
 import { safeError } from './errors.js';
+import { MyTuDelft } from './mytudelft.js';
+import { MyTimetable } from './mytimetable.js';
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? 'serve';
   if (command === '--help') {
-    process.stdout.write('Usage: node dist/cli.js [serve|login [--fresh] [--catalog]|logout|doctor]\n');
+    process.stdout.write('Usage: node dist/cli.js [serve|login [--fresh] [--catalog] [--only brightspace,mytu,timetable]|logout|doctor]\n');
     return;
   }
   const config = loadConfig(), auth = new Auth(config);
   if (command === 'login') {
-    process.stderr.write(`${auth.beginLogin(process.argv.includes('--catalog') ? 'catalog' : 'brightspace', { fresh: process.argv.includes('--fresh') }).message}\n`);
-    const status = await auth.waitForLogin();
-    process.stderr.write(`${status.message}\n`);
-    await auth.close();
-    if (status.state !== 'connected') process.exitCode = 1;
+    const args = process.argv.slice(3);
+    const fresh = args.includes('--fresh'), catalog = args.includes('--catalog');
+    const onlyArg = args[args.indexOf('--only') + 1];
+    const only = args.includes('--only') && onlyArg ? new Set(onlyArg.split(',')) : undefined;
+    const wants = (step: string): boolean => !only || only.has(step);
+    const say = (line: string): void => { process.stderr.write(`${line}\n`); };
+    let failed = false;
+
+    // 1. Brightspace: the one interactive sign-in. Everything else reuses its SURF SSO cookies.
+    say(auth.beginLogin(catalog ? 'catalog' : 'brightspace', { fresh }).message);
+    const brightspace = await auth.waitForLogin();
+    say(`Brightspace: ${brightspace.message}`);
+    if (brightspace.state !== 'connected' || catalog) { await auth.close(); if (brightspace.state !== 'connected') process.exitCode = 1; return; }
+
+    const client = new BrightspaceClient(config, auth);
+    const mytu = new MyTuDelft(auth, client);
+    const timetable = new MyTimetable(config, client, auth);
+    try {
+      // 2. My TU Delft (OSIRIS): silent through shared SSO first, a window only if the university asks.
+      if (wants('mytu')) {
+        try { await mytu.checkAuth(); say('My TU Delft: connected through your saved university sign-in.'); }
+        catch {
+          await mytu.beginLogin({ silent: false });
+          const status = await mytu.waitForLogin();
+          say(`My TU Delft: ${status.message}`);
+          if (status.state !== 'connected') failed = true;
+        }
+      }
+      // 3. MyTimetable: read the personal calendar link from the site, silently when SSO still holds.
+      if (wants('timetable')) {
+        try { await timetable.capture({ silent: true }); say('MyTimetable: calendar subscription connected.'); }
+        catch (silentError) {
+          const code = safeError(silentError).code;
+          if (code === 'TIMETABLE_AUTH_REQUIRED' || code === 'TIMETABLE_LOGIN_TIMEOUT') {
+            try { await timetable.capture({ silent: false }); say('MyTimetable: calendar subscription connected.'); }
+            catch (error) { failed = true; say(`MyTimetable: ${safeError(error).message}`); }
+          } else { failed = true; say(`MyTimetable: ${safeError(silentError).message}`); }
+        }
+      }
+    } finally {
+      timetable.close(); await mytu.close(); await client.close(); await auth.close();
+    }
+    say(failed ? 'Done with warnings. Lecture recordings and university email have their own logins; see the README.'
+      : 'Done. Brightspace, My TU Delft and MyTimetable are connected. Lecture recordings and university email have their own logins; see the README.');
+    if (failed) process.exitCode = 1;
   } else if (command === 'logout') {
     await auth.logout();
     process.stderr.write('Local login removed. Cached materials remain in the data directory.\n');
@@ -38,7 +80,7 @@ async function main(): Promise<void> {
     const { serve } = await import('./server.js');
     await serve(config, auth);
   } else {
-    process.stderr.write('Usage: node dist/cli.js [serve|login [--fresh] [--catalog]|logout|doctor]\n');
+    process.stderr.write('Usage: node dist/cli.js [serve|login [--fresh] [--catalog] [--only brightspace,mytu,timetable]|logout|doctor]\n');
     process.exitCode = 1;
   }
 }
