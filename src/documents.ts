@@ -1,4 +1,4 @@
-import { Worker } from 'node:worker_threads';
+import { startParsingWorker } from './worker.js';
 import mammoth from 'mammoth';
 import { unzipSync, zipSync, strFromU8, type Unzipped } from 'fflate';
 import { load } from 'cheerio';
@@ -18,11 +18,8 @@ export interface DocumentText { text: string; format: string; pages?: number; wa
 export async function extractPdfInWorker(bytes: Buffer, options: { workerUrl?: URL; timeoutMs?: number } = {}): Promise<DocumentText> {
   const workerUrl = options.workerUrl ?? new URL(import.meta.url.endsWith('.ts') ? './pdf-worker.ts' : './pdf-worker.js', import.meta.url);
   const data = Uint8Array.from(bytes);
-  // Only source-mode workers need tsx. Parent test/eval/V8 flags may be invalid in a worker.
-  const execArgv = workerUrl.pathname.endsWith('.ts') ? ['--import', import.meta.resolve('tsx')] : [];
   return new Promise<DocumentText>((resolve, reject) => {
-    const worker = new Worker(workerUrl, {
-      execArgv,
+    const worker = startParsingWorker(workerUrl, {
       workerData: { bytes: data, maxPages: 600, maxTextLength: MAX_TEXT_LENGTH }, transferList: [data.buffer],
       resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32, stackSizeMb: 4 },
       stdout: true, stderr: true,

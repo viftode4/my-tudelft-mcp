@@ -6,11 +6,13 @@ Use synthetic fixtures and bounded changes. Account ownership, explicit action p
 
 ```sh
 npm ci
-npx playwright install chromium
 npm run check
 npm test
 npm run build
 ```
+
+`npm run login` uses an installed Google Chrome or Microsoft Edge when it finds
+one. Run `npx playwright install chromium` only if you have neither.
 
 Read the [README](README.md) for optional live checks. Automated tests must not require university credentials, downloaded coursework or a private account.
 

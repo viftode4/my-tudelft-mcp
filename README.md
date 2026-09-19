@@ -23,7 +23,11 @@ npm run doctor
 
 If Google Chrome or Microsoft Edge is installed, the connector uses it and nothing is downloaded. Without either, run `npx playwright install chromium` once (about 300 MB), or set `BRIGHTSPACE_BROWSER_CHANNEL` to any Playwright channel name.
 
-`npm run login` is the one sign-in. It opens Brightspace in a window; complete TU Delft sign-in and MFA there. Passwords and MFA codes belong there, never in agent messages or tool arguments. In the same run it then connects My TU Delft (OSIRIS) through the shared university SSO and reads your personal MyTimetable calendar link from the MyTimetable site, both silently unless the university asks for sign-in again. `npm run login -- --only brightspace` limits it to Brightspace; `--only mytu,timetable` skips the Brightspace window when it is already connected. Lecture recordings (per course) and university email (Microsoft) have their own logins, described below. `doctor` verifies the saved session without printing credentials.
+`npm run login` is the one sign-in. It opens Brightspace in a window; complete TU Delft sign-in and MFA there. Passwords and MFA codes belong there, never in agent messages or tool arguments. In the same run it then connects My TU Delft (OSIRIS) through the shared university SSO and reads your personal MyTimetable calendar link from the MyTimetable site, both silently unless the university asks for sign-in again. A calendar subscription that is already saved is kept as it is.
+
+`--only` narrows the run to the services you name, out of `brightspace`, `mytu` and `timetable`. `npm run login -- --only brightspace` limits it to Brightspace. `--only mytu,timetable` opens no Brightspace window at all: it uses the saved Brightspace session and stops with an explanation if there is none. `--only timetable` also re-reads the calendar link when one is already saved. An unknown service name or option stops the command instead of quietly skipping the work you asked for. `--fresh` starts from a clean Brightspace browser and reconnects the other services from scratch.
+
+Lecture recordings (per course) and university email (Microsoft) have their own logins, described below. `npm run doctor` reports every service — Brightspace, My TU Delft, MyTimetable, recordings and optional email — with the next step for anything not connected, and prints no credentials, identifiers or private calendar links.
 
 Brightspace, My TU Delft and Collegerama share an account-bound TU Delft/SURF SSO cookie store. After a service verifies the linked account, it saves refreshed SSO cookies for subsequent service connections. Windows protects this state with DPAPI. Service cookies and tokens remain separate; the connector does not import your everyday browser profile.
 
@@ -88,7 +92,7 @@ no provider adapter or MCP tools yet, and cannot submit print jobs or add credit
 | Campus spaces | `search_study_spaces`, `search_teaching_rooms` | Public catalogue and room specifications; no live occupancy or reservations |
 | Software | `search_software`, `get_software` | Public software catalogue, guidance and terms; no licence entitlement or installation claim |
 | ICT notices | `get_ict_notices` | Public incidents, maintenance and information with source dates and pagination |
-| Login | `begin_login`, `get_login_status`, `check_auth`, `logout` | Browser login and saved-session checks |
+| Login | `get_connection_status`, `begin_login`, `get_login_status`, `check_auth`, `logout` | One silent overview of every service, browser login and saved-session checks |
 | Courses | `list_courses`, `get_course_content`, `get_course_tools` | Own memberships, outlines and navigation |
 | Public Study Guide | `search_study_guide`, `get_study_guide` | Anonymous search and exact code/year information |
 | Announcements | `get_announcements`, `read_announcement_attachment` | Text, dates and exact attached files |
@@ -116,7 +120,11 @@ no provider adapter or MCP tools yet, and cannot submit print jobs or add credit
 | File submissions | `prepare_assignment_submission`, `confirm_assignment_submission` | Exact file previews and confirmed submission |
 | Text submissions | `prepare_text_submission`, `confirm_text_submission` | Literal-text previews and confirmed submission |
 
-The server exposes 85 tools. The `brightspace://usage` resource describes workflows; `course_briefing` supplies a sourced briefing template. Rebuild and reconnect the MCP client after updating so it discovers new tools.
+The server exposes 86 tools. The `brightspace://usage` resource describes workflows; `course_briefing` supplies a sourced briefing template. Rebuild and reconnect the MCP client after updating so it discovers new tools.
+
+## Checking what is connected
+
+`get_connection_status` reports Brightspace, My TU Delft (OSIRIS), MyTimetable, lecture recordings and optional university email in one call. It runs the same silent saved-session checks those services use individually, opens no login window, and returns a per-service `state` with a `nextStep` for anything that is not ready. Services bound to the Brightspace account are reported as `blocked` — not guessed at — when Brightspace itself is not connected, and optional email never affects overall readiness. The report contains no account identifier, token or private calendar link, so it is safe to read aloud, log or attach to an issue. `npm run doctor` prints the same overview from the command line.
 
 ## Reading and search
 

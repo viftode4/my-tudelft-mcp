@@ -4,6 +4,48 @@ This document describes source-level verification and its limits. Private accoun
 
 ## Automated checks
 
+### One login runner, combined connection status and the supported Node floor
+
+`src/login-flow.ts` now runs every browser sign-in (Brightspace, My TU Delft,
+Collegerama, MyTimetable), and `npm run login` connects Brightspace, My TU Delft
+and MyTimetable in one run. `--only` selects individual services; it no longer
+opens a Brightspace window for a run that did not ask for one, and an unknown
+option or service name stops the command instead of reporting a success that
+skipped the requested work. A MyTimetable subscription that is already saved is
+kept unless `--only timetable` or `--fresh` asks for it to be read again.
+
+`get_connection_status` and `npm run doctor` report Brightspace, My TU Delft,
+MyTimetable, recordings and optional email in one silent pass, with a next step
+for anything not ready. Account-bound services are reported as `blocked`, not
+guessed at, when Brightspace is not connected, and opt-in extras are separated
+from services that `npm run login` connects. The report excludes account
+identifiers, tokens and the private calendar link; a synthetic test asserts that
+an unexpected provider failure is sanitized rather than surfaced.
+
+Parsing workers (timetable and PDF) previously failed to start from TypeScript
+sources on the supported Node floor: Node's own type stripping runs the `.ts`
+entry but does not rewrite its `./module.js` imports, and `--import` in worker
+`execArgv` is not applied there, so the worker died with `ERR_MODULE_NOT_FOUND`
+and seven timetable tests failed on Node 22 while passing on Node 24. The worker
+loader is now registered inside the worker, and CI runs the matrix on both
+Node 22.13 and Node 24 so the documented floor is actually tested.
+
+Observed on Linux with Node 22.22.2 in this checkout:
+
+| Check | Result |
+| --- | --- |
+| `npm run check` | Passed |
+| `npm test` | 547 passed, 0 failed, 11 skipped (558 total) |
+| `npm run build` | Passed |
+| `node scripts/smoke-install.mjs` | 86 tools; chromium and JSON-RPC protocol passed |
+| `npm run doctor` without a saved session | Reported Brightspace sign-in needed and the rest blocked, in 1.4 s, with no identifiers |
+
+The login-runner commit passed CI on Ubuntu, Windows and macOS with Node 24. No
+live university sign-in, calendar capture or OSIRIS read was performed for this
+change: the login runner, the combined overview and the `--only` planner are
+covered by synthetic tests and fakes only. Silent SSO behavior against the real
+university remains as previously recorded.
+
 ### Exam planning and public campus readers
 
 Six new tools add an on-demand exam-planning overview, SoftwareFinder search/detail,

@@ -8,6 +8,9 @@ The same Node entrypoint works on Windows, macOS and Linux.
 ## Repository map
 
 - `src/cli.ts`: login, doctor and stdio entrypoint.
+- `src/login-flow.ts`: the one browser login loop shared by every service.
+- `src/connections.ts`: the combined connection overview used by both.
+- `src/worker.ts`: parsing-worker startup for compiled and source runs.
 - `src/server.ts`: tools, schemas and `brightspace://usage` resource.
 - `src/auth.ts`, `src/vault.ts`, `src/sso.ts`: authentication/storage.
 - `src/client.ts`: bounded Brightspace requests.
@@ -19,8 +22,9 @@ The same Node entrypoint works on Windows, macOS and Linux.
 
 ## Verification and privacy
 
-Run `npm ci`, `npx playwright install chromium`, `npm run check`, `npm test`,
-`npm run build`, then `node scripts/smoke-install.mjs`. Keep diagnostics off
+Run `npm ci`, `npm run check`, `npm test`, `npm run build`, then
+`node scripts/smoke-install.mjs`. Add `npx playwright install chromium` only when
+neither Google Chrome nor Microsoft Edge is installed. Keep diagnostics off
 MCP stdout. Automated success does not prove university authentication works.
 Use synthetic regression fixtures. Read `CONTRIBUTING.md` before committing.
 Keep sessions, private links, coursework, grades and reports in ignored `.local/`.
@@ -28,8 +32,9 @@ Never publish browser snapshots or real student data. Review staged changes.
 
 ## Authentication and actions
 
-Routine session renewal must never open a visible browser window. Check saved
-provider authentication first; Brightspace `check_auth` accepts `refresh: true`
+Use `get_connection_status` to see every service at once before deciding what to
+connect; it is silent and opens no window. Routine session renewal must never
+open a visible browser window. Check saved provider authentication first; Brightspace `check_auth` accepts `refresh: true`
 when reads work but upload credentials need renewal. All `begin_*_login` tools
 require `interactive: true` and the student's explicit request for a login window.
 An authentication error alone does not authorize opening one. Report password,
