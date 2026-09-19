@@ -13,8 +13,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        # 22.13 is the supported floor in package.json engines; 24 is the current line.
-        node-version: ['22.13', '24']
+        # 22.16 is the supported floor in package.json engines; 24 is the current line.
+        node-version: ['22.16', '24']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:

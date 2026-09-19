@@ -10,7 +10,7 @@ promised. A graphical desktop is required for initial login.
 
 Find an existing checkout and host configuration before creating duplicates.
 Check `git --version`, `node --version`, `npm --version`. Node must be at least
-22.13 with built-in SQLite; CI uses Node 24. If missing, use the machine's normal
+22.16, the first 22.x release whose bundled SQLite includes the FTS5 extension local search needs; CI covers 22.16 and 24. If missing, use the machine's normal
 package manager within the user's authorization and recheck. Preserve unrelated
 runtimes/settings. Use the user's chosen directory, not another machine's path.
 

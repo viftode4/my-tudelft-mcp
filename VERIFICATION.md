@@ -28,7 +28,18 @@ entry but does not rewrite its `./module.js` imports, and `--import` in worker
 `execArgv` is not applied there, so the worker died with `ERR_MODULE_NOT_FOUND`
 and seven timetable tests failed on Node 22 while passing on Node 24. The worker
 loader is now registered inside the worker, and CI runs the matrix on both
-Node 22.13 and Node 24 so the documented floor is actually tested.
+Node 22.16 and Node 24 so the documented floor is actually tested.
+
+Running that matrix showed the declared floor was wrong in a second way.
+`package.json` required Node >= 22.13, but Node's bundled SQLite did not include
+the FTS5 extension that local course search needs until 22.16.0. Probing official
+Linux builds, 22.13.0, 22.14.0 and 22.15.0 fail `CREATE VIRTUAL TABLE ... USING
+fts5` while 22.16.0, 22.17.0, 22.19.0 and 22.22.2 succeed; on Node 22.13 the full
+suite failed 18 library tests on both Ubuntu and macOS with a bare
+`no such module: fts5`. The floor is now 22.16, which passes the whole suite
+locally, and an older build reports `SQLITE_FTS5_MISSING` with the version it is
+running and what to upgrade to, instead of the raw SQLite error. Only local
+search is affected; the other tools work on those builds.
 
 Observed on Linux with Node 22.22.2 in this checkout:
 
@@ -39,6 +50,8 @@ Observed on Linux with Node 22.22.2 in this checkout:
 | `npm run build` | Passed |
 | `node scripts/smoke-install.mjs` | 86 tools; chromium and JSON-RPC protocol passed |
 | `npm run doctor` without a saved session | Reported Brightspace sign-in needed and the rest blocked, in 1.4 s, with no identifiers |
+| `npm test` on the declared floor, Node 22.16.0 | 547 passed, 0 failed, 11 skipped |
+| `npm test` on Node 22.13.0 in CI | 18 library tests failed for missing FTS5; the timetable worker tests passed |
 
 The login-runner commit passed CI on Ubuntu, Windows and macOS with Node 24. No
 live university sign-in, calendar capture or OSIRIS read was performed for this

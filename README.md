@@ -8,7 +8,7 @@ This repository publishes the source for a personal connector. The core runs on 
 
 **Installing with an AI agent?** Give it this repository URL and ask it to follow [AGENTS.md](AGENTS.md) and the [agent installation runbook](docs/agent-install.md). It can install dependencies, build, generate your machine's MCP configuration and verify startup. Initial university authentication and MFA still belong to you in the browser.
 
-Requires Node.js 22.13 or later with built-in SQLite support, npm, and a graphical session for login. Automated CI for the published core passed on Ubuntu, Windows and macOS. This does not establish live sign-in compatibility or optional email dependency support on every platform.
+Requires Node.js 22.16 or later, npm, and a graphical session for login. Local course search uses Node's bundled SQLite with its FTS5 extension, which Node 22.16 is the first 22.x release to include; on 22.13 to 22.15 the connector reports that FTS5 is missing and everything except local search still works. Automated CI for the published core passed on Ubuntu, Windows and macOS. This does not establish live sign-in compatibility or optional email dependency support on every platform.
 
 Clone this repository, then install from the checkout:
 

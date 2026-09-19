@@ -5,7 +5,7 @@
   "type": "module",
   "description": "A local Brightspace MCP for everyday TU Delft course work.",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.16"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
