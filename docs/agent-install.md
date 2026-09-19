@@ -22,15 +22,16 @@ For a new checkout, run each command in order and check its exit status:
 git clone https://github.com/viftode4/my-tudelft-mcp.git
 cd my-tudelft-mcp
 npm ci
-npx playwright install chromium
 npm run build
 node scripts/smoke-install.mjs
 node scripts/mcp-config.mjs
 ```
 
-These commands work in PowerShell and POSIX shells. On Linux, missing browser
-libraries may require `npx playwright install --with-deps chromium` and system
-package permissions. The startup smoke uses an empty temporary data directory,
+These commands work in PowerShell and POSIX shells. An installed Google Chrome or
+Microsoft Edge is used for sign-in when present, so nothing is downloaded. Without
+either, run `npx playwright install chromium` once (about 300 MB); on Linux,
+missing browser libraries may require `npx playwright install --with-deps chromium`
+and system package permissions. The smoke check below reports which it used. The startup smoke uses an empty temporary data directory,
 checks headless Chromium and MCP discovery, and never opens interactive login.
 
 ## Configure the host
@@ -53,12 +54,16 @@ itself, tell the student that one host restart is required.
 
 ## Authenticate once
 
-Call `check_auth` first. Reuse a connected account. Use `refresh: true` for a
+Call `get_connection_status` first: it reports Brightspace, My TU Delft,
+MyTimetable, recordings and optional email in one silent call, with the next step
+for each. Use `check_auth` when you need Brightspace alone. Reuse a connected account. Use `refresh: true` for a
 silent credential refresh, including when reads work but uploads fail. Routine
 renewal must not open a visible window. If interactive sign-in is required,
 explain that and wait for the student's explicit request to open a window.
 Then call `begin_login` with `interactive: true` once and poll
-`get_login_status`. Terminal alternative: `npm run login`, then `npm run doctor`.
+`get_login_status`. Terminal alternative: `npm run login`, which connects
+Brightspace, My TU Delft and MyTimetable in one run, then `npm run doctor`, which
+reports every service.
 Never ask for passwords, MFA, cookies or tokens in chat. Never navigate to copied
 SSO callback URLs or repeatedly open browsers. Without a graphical desktop,
 finish installation and report authentication pending. Retain private `.local/`.
